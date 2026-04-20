@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# pyright: basic
 """
 curl_runner_gui.py — Curl Runner Desktop (v3)
 Tính năng mới: Multi-tab · Pre-request Script · Beautify Body
@@ -269,6 +270,23 @@ class CurlRunnerApp(tk.Tk):
         self.tabs: list[RequestTab] = []
         self.active_tab_idx = -1
 
+        # Response panel widgets — khai báo tường minh để Pylance nhận diện
+        # (thực tế được tạo trong _mk_text_tab qua setattr)
+        self.body_tw:     tk.Text  = None  # type: ignore
+        self.headers_tw:  tk.Text  = None  # type: ignore
+        self.info_tw:     tk.Text  = None  # type: ignore
+        self.log_tw:      tk.Text  = None  # type: ignore
+        self.body_frame:    tk.Frame = None  # type: ignore
+        self.headers_frame: tk.Frame = None  # type: ignore
+        self.info_frame:    tk.Frame = None  # type: ignore
+        self.log_frame:     tk.Frame = None  # type: ignore
+        self.stab_history:     tk.Button = None  # type: ignore
+        self.stab_collections: tk.Button = None  # type: ignore
+        self.rtab_body:    tk.Button = None  # type: ignore
+        self.rtab_headers: tk.Button = None  # type: ignore
+        self.rtab_info:    tk.Button = None  # type: ignore
+        self.rtab_log:     tk.Button = None  # type: ignore
+
         self._setup_fonts()
         self._build_ui()
         self._new_tab()   # Start with 1 blank tab
@@ -295,7 +313,7 @@ class CurlRunnerApp(tk.Tk):
         topbar.pack_propagate(False)
         tk.Label(topbar, text="⚡ CURL RUNNER", font=self.fn_title,
                  bg=BG2, fg=ACCENT).pack(side="left", padx=16, pady=8)
-        tk.Label(topbar, text="v3  ·  Multi-tab · Pre-script · Beautify",
+        tk.Label(topbar, text="v4  ·  Multi-tab · Pre-script · Beautify · Compare",
                  font=self.fn_label, bg=BG2, fg=TEXT_DIM).pack(side="left")
 
         ef = tk.Frame(topbar, bg=BG2)
@@ -306,7 +324,8 @@ class CurlRunnerApp(tk.Tk):
                                       state="readonly", font=self.fn_label)
         self.env_combo.pack(side="left", padx=4)
         self.env_combo.bind("<<ComboboxSelected>>", self._on_env_change)
-        self._mkbtn(ef, "⚙ Manage", self._open_env_editor, side="left", pad=(4,0))
+        self._mkbtn(ef, "⚙ Manage",  self._open_env_editor, side="left", pad=(4,0))
+        self._mkbtn(ef, "⇄ Compare", self._open_compare,    side="left", pad=(10,0))
 
         # 3-column layout
         outer = tk.PanedWindow(self, orient="horizontal", bg=BG,
@@ -328,7 +347,10 @@ class CurlRunnerApp(tk.Tk):
                             relief="flat", cursor="hand2", pady=6, bd=0,
                             command=lambda v=val: self._show_sidebar(v))
             btn.pack(side="left", fill="x", expand=True)
-            setattr(self, f"stab_{val}", btn)
+            if val == "history":
+                self.stab_history = btn
+            else:
+                self.stab_collections = btn
         self.sidebar_history     = tk.Frame(frame, bg=SIDEBAR)
         self.sidebar_collections = tk.Frame(frame, bg=SIDEBAR)
         self._build_history_panel(self.sidebar_history)
@@ -1143,7 +1165,10 @@ class CurlRunnerApp(tk.Tk):
                             relief="flat", cursor="hand2", padx=12, pady=5,
                             command=lambda v=val: self._show_resp_tab(v), bd=0)
             btn.pack(side="left", padx=(0,2))
-            setattr(self, f"rtab_{val}", btn)
+            if val == "body":       self.rtab_body    = btn
+            elif val == "headers":  self.rtab_headers = btn
+            elif val == "info":     self.rtab_info    = btn
+            elif val == "log":      self.rtab_log     = btn
 
         self.resp_content = tk.Frame(frame, bg=BG)
         self.resp_content.pack(fill="both", expand=True, pady=(4,0))
@@ -1170,7 +1195,7 @@ class CurlRunnerApp(tk.Tk):
         self._show_resp_tab("body")
         return frame
 
-    def _mk_text_tab(self, name, fnt):
+    def _mk_text_tab(self, name: str, fnt: tkfont.Font) -> None:
         frame = tk.Frame(self.resp_content, bg=BG)
         wrap  = tk.Frame(frame, bg=BORDER)
         wrap.pack(fill="both", expand=True)
@@ -1180,16 +1205,27 @@ class CurlRunnerApp(tk.Tk):
         sb = tk.Scrollbar(wrap, command=tw.yview, bg=BG3, troughcolor=BG2, bd=0)
         tw.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y"); tw.pack(fill="both", expand=True, padx=1, pady=1)
-        setattr(self, f"{name}_frame", frame)
-        setattr(self, f"{name}_tw",    tw)
+        # Gán trực tiếp thay vì setattr để Pylance track được
+        if name == "body":
+            self.body_frame = frame; self.body_tw = tw
+        elif name == "headers":
+            self.headers_frame = frame; self.headers_tw = tw
+        elif name == "info":
+            self.info_frame = frame; self.info_tw = tw
+        elif name == "log":
+            self.log_frame = frame; self.log_tw = tw
 
-    def _show_resp_tab(self, val):
-        for v in ("body","headers","info","log"):
-            getattr(self, f"{v}_frame").pack_forget()
-            getattr(self, f"rtab_{v}").config(
-                bg=BG3 if v==val else BG,
-                fg=ACCENT if v==val else TEXT_DIM)
-        getattr(self, f"{val}_frame").pack(fill="both", expand=True)
+    def _show_resp_tab(self, val: str) -> None:
+        _frames = {"body": self.body_frame, "headers": self.headers_frame,
+                   "info": self.info_frame, "log": self.log_frame}
+        _btns   = {"body": self.rtab_body, "headers": self.rtab_headers,
+                   "info": self.rtab_info, "log": self.rtab_log}
+        for v, frame in _frames.items():
+            if frame: frame.pack_forget()
+            btn = _btns.get(v)
+            if btn: btn.config(bg=BG3 if v==val else BG, fg=ACCENT if v==val else TEXT_DIM)
+        target = _frames.get(val)
+        if target: target.pack(fill="both", expand=True)
 
     def _clear_response_panel(self):
         self.status_badge.config(text="—", fg=TEXT_DIM)
@@ -1397,11 +1433,415 @@ class CurlRunnerApp(tk.Tk):
         b.pack(side=side, padx=pad)
         return b
 
+    def _open_compare(self):
+        """Mở popup so sánh curl. Seed từ các tab đang mở nếu có."""
+        open_curls = []
+        for tab in self.tabs:
+            if hasattr(tab,"_curl_tw"):
+                curl = tab._curl_tw.get("1.0","end").strip()
+                if curl and not getattr(tab,"_ph_active",False):
+                    open_curls.append(curl)
+        # Đảm bảo ít nhất 2 slot
+        while len(open_curls) < 2:
+            open_curls.append("")
+        CurlCompareWindow(self, initial_curls=open_curls)
+
     def _chk(self, parent, text, var):
         tk.Checkbutton(parent, text=text, variable=var,
                        font=self.fn_label, bg=BG, fg=TEXT_DIM,
                        activebackground=BG, selectcolor=BG3,
                        relief="flat", bd=0).pack(side="left", padx=(0,8))
+
+
+# ══════════════════════════════════════════════
+# CURL COMPARE WINDOW
+# ══════════════════════════════════════════════
+class CurlCompareWindow(tk.Toplevel):
+    """
+    Popup so sánh n curl command side-by-side.
+    - Mỗi panel curl có thể kéo thả để mở rộng / thu nhỏ (PanedWindow dọc)
+    - Highlight khác biệt theo từng dòng (line-level diff)
+    - Thêm / xóa panel động
+    - Parse curl thành cấu trúc để so sánh semantic (method, url, headers, body)
+    """
+
+    # Highlight colors
+    HL_ADDED   = "#1e3a1e"   # xanh lá — dòng chỉ có ở panel này
+    HL_CHANGED = "#3a2e10"   # vàng     — dòng khác so với panel khác
+    HL_SAME    = BG2          # bình thường
+    HL_MISSING = "#2a1a1a"   # đỏ nhạt  — dòng trống (padding align)
+    FG_ADDED   = "#6fcf6f"
+    FG_CHANGED = "#f0c060"
+    FG_MISSING = "#555b70"
+
+    def __init__(self, parent: "CurlRunnerApp", initial_curls=None):
+        super().__init__(parent)
+        self.parent_app = parent
+        self.title("⇄ So Sánh Curl")
+        self.geometry("1300x780")
+        self.minsize(800, 500)
+        self.configure(bg=BG)
+
+        self._setup_fonts()
+        self._panels: list[dict] = []   # {frame, text_w, curl_var, label_var}
+        self._build_ui()
+
+        # Seed with initial curls (from open tabs or empty)
+        seeds = initial_curls or ["", ""]
+        for c in seeds:
+            self._add_panel(c)
+
+        self._run_compare()
+
+    def _setup_fonts(self):
+        self.fn_mono  = tkfont.Font(family="Consolas", size=10)
+        self.fn_monos = tkfont.Font(family="Consolas", size=9)
+        self.fn_label = tkfont.Font(family="Segoe UI", size=9)
+        self.fn_btn   = tkfont.Font(family="Segoe UI", size=9, weight="bold")
+        self.fn_badge = tkfont.Font(family="Segoe UI", size=8, weight="bold")
+        self.fn_small = tkfont.Font(family="Segoe UI", size=8)
+
+    def _build_ui(self):
+        # ── Toolbar
+        tb = tk.Frame(self, bg=BG2, height=44)
+        tb.pack(fill="x", side="top")
+        tb.pack_propagate(False)
+
+        tk.Label(tb, text="⇄  SO SÁNH CURL", font=tkfont.Font(family="Segoe UI",size=12,weight="bold"),
+                 bg=BG2, fg=ACCENT).pack(side="left", padx=14, pady=8)
+
+        self._mkbtn(tb, "＋ Thêm panel",  self._add_panel,    side="left", pad=(4,0))
+        self._mkbtn(tb, "⇄ So sánh",      self._run_compare,  side="left", pad=(6,0))
+        self._mkbtn(tb, "📋 Từ tab mở",   self._load_from_tabs, side="left", pad=(6,0))
+
+        tk.Label(tb, text="Double-click tên để đổi  ·  Kéo thanh phân cách để resize",
+                 font=tkfont.Font(family="Segoe UI",size=8),
+                 bg=BG2, fg=TEXT_DIM).pack(side="right", padx=14)
+
+        # ── Legend
+        leg = tk.Frame(self, bg=BG)
+        leg.pack(fill="x", padx=12, pady=(4,2))
+        for color, fg, label in [
+            (self.HL_ADDED,   self.FG_ADDED,   "● Chỉ có ở panel này"),
+            (self.HL_CHANGED, self.FG_CHANGED, "● Khác biệt"),
+            (self.HL_MISSING, self.FG_MISSING, "● Dòng trống (align)"),
+            (self.HL_SAME,    TEXT,             "  Giống nhau"),
+        ]:
+            dot = tk.Label(leg, text=label, font=self.fn_small, bg=color, fg=fg, padx=6, pady=1)
+            dot.pack(side="left", padx=(0,6))
+
+        # ── Split results label
+        self.result_lbl = tk.Label(self, text="", font=self.fn_small,
+                                   bg=BG, fg=TEXT_DIM, anchor="w")
+        self.result_lbl.pack(fill="x", padx=14, pady=(0,2))
+
+        # ── PanedWindow (horizontal) — chứa các panel curl
+        self.paned = tk.PanedWindow(self, orient="horizontal", bg=BORDER,
+                                    sashwidth=6, sashrelief="flat",
+                                    sashpad=2, bd=0)
+        self.paned.pack(fill="both", expand=True, padx=4, pady=(0,6))
+
+    # ── Panel management ──────────────────────
+    def _add_panel(self, curl_text=""):
+        idx   = len(self._panels)
+        name  = f"Curl {idx+1}"
+
+        outer = tk.Frame(self.paned, bg=BG, padx=0, pady=0)
+
+        # Header row
+        hdr = tk.Frame(outer, bg=BG3, height=30)
+        hdr.pack(fill="x"); hdr.pack_propagate(False)
+
+        label_var = tk.StringVar(value=name)
+        lbl = tk.Label(hdr, textvariable=label_var, font=self.fn_label,
+                       bg=BG3, fg=ACCENT, cursor="hand2")
+        lbl.pack(side="left", padx=8)
+        lbl.bind("<Double-Button-1>",
+                 lambda e, lv=label_var: self._rename_panel(lv))
+
+        # Diff summary badge (updated after compare)
+        diff_badge = tk.Label(hdr, text="", font=self.fn_small,
+                              bg=BG3, fg=TEXT_DIM)
+        diff_badge.pack(side="left", padx=4)
+
+        # Remove button (keep min 2)
+        rm_btn = tk.Button(hdr, text="✕", font=self.fn_small,
+                           bg=BG3, fg=TEXT_DIM, activebackground=RED_C,
+                           relief="flat", cursor="hand2", bd=0, padx=6,
+                           command=lambda o=outer: self._remove_panel(o))
+        rm_btn.pack(side="right", padx=4)
+
+        # Vertical paned: input (top) + diff view (bottom)
+        vpane = tk.PanedWindow(outer, orient="vertical", bg=BORDER,
+                               sashwidth=5, sashrelief="flat", bd=0)
+        vpane.pack(fill="both", expand=True)
+
+        # ── Input area
+        inp_frame = tk.Frame(vpane, bg=BG2)
+        inp_lbl = tk.Label(inp_frame, text="INPUT", font=self.fn_badge,
+                           bg=BG2, fg=TEXT_DIM, anchor="w")
+        inp_lbl.pack(fill="x", padx=6, pady=(4,0))
+
+        inp_wrap = tk.Frame(inp_frame, bg=BORDER)
+        inp_wrap.pack(fill="both", expand=True, padx=2, pady=(2,2))
+        inp_tw = tk.Text(inp_wrap, bg=BG2, fg=TEXT, font=self.fn_mono,
+                         wrap="none", relief="flat", padx=8, pady=6,
+                         insertbackground=ACCENT,
+                         selectbackground=ACCENT, selectforeground="#fff",
+                         undo=True, bd=0)
+        sb_x = tk.Scrollbar(inp_wrap, orient="horizontal",
+                             command=inp_tw.xview, bg=BG3, troughcolor=BG2, bd=0)
+        sb_y = tk.Scrollbar(inp_wrap, command=inp_tw.yview,
+                             bg=BG3, troughcolor=BG2, bd=0)
+        inp_tw.configure(xscrollcommand=sb_x.set, yscrollcommand=sb_y.set)
+        sb_y.pack(side="right", fill="y")
+        sb_x.pack(side="bottom", fill="x")
+        inp_tw.pack(fill="both", expand=True, padx=1, pady=1)
+        if curl_text:
+            inp_tw.insert("1.0", curl_text)
+
+        vpane.add(inp_frame, minsize=80, height=200)
+
+        # ── Diff view area (highlighted)
+        diff_frame = tk.Frame(vpane, bg=BG)
+        diff_lbl = tk.Label(diff_frame, text="DIFF VIEW", font=self.fn_badge,
+                            bg=BG, fg=TEXT_DIM, anchor="w")
+        diff_lbl.pack(fill="x", padx=6, pady=(4,0))
+
+        diff_wrap = tk.Frame(diff_frame, bg=BORDER)
+        diff_wrap.pack(fill="both", expand=True, padx=2, pady=(2,2))
+        diff_tw = tk.Text(diff_wrap, bg=BG2, fg=TEXT, font=self.fn_monos,
+                          wrap="none", relief="flat", padx=8, pady=6,
+                          state="disabled", bd=0)
+        sb_dx = tk.Scrollbar(diff_wrap, orient="horizontal",
+                              command=diff_tw.xview, bg=BG3, troughcolor=BG2, bd=0)
+        sb_dy = tk.Scrollbar(diff_wrap, command=diff_tw.yview,
+                              bg=BG3, troughcolor=BG2, bd=0)
+        diff_tw.configure(xscrollcommand=sb_dx.set, yscrollcommand=sb_dy.set)
+        sb_dy.pack(side="right", fill="y")
+        sb_dx.pack(side="bottom", fill="x")
+        diff_tw.pack(fill="both", expand=True, padx=1, pady=1)
+
+        # Configure tags
+        diff_tw.tag_configure("added",   background=self.HL_ADDED,   foreground=self.FG_ADDED)
+        diff_tw.tag_configure("changed", background=self.HL_CHANGED, foreground=self.FG_CHANGED)
+        diff_tw.tag_configure("missing", background=self.HL_MISSING, foreground=self.FG_MISSING)
+        diff_tw.tag_configure("same",    background=self.HL_SAME,    foreground=TEXT)
+        diff_tw.tag_configure("linenum", foreground=TEXT_DIM)
+
+        vpane.add(diff_frame, minsize=80)
+
+        self.paned.add(outer, minsize=250)
+
+        panel = {
+            "outer":      outer,
+            "vpane":      vpane,
+            "inp_tw":     inp_tw,
+            "diff_tw":    diff_tw,
+            "label_var":  label_var,
+            "diff_badge": diff_badge,
+        }
+        self._panels.append(panel)
+        return panel
+
+    def _remove_panel(self, outer_frame):
+        if len(self._panels) <= 2:
+            messagebox.showinfo("","Cần ít nhất 2 panel để so sánh."); return
+        idx = next((i for i,p in enumerate(self._panels) if p["outer"] is outer_frame), None)
+        if idx is None: return
+        self.paned.remove(outer_frame)
+        outer_frame.destroy()
+        self._panels.pop(idx)
+        self._run_compare()
+
+    def _rename_panel(self, label_var):
+        new = simpledialog.askstring("Đổi tên", "Tên panel:",
+                                     initialvalue=label_var.get(), parent=self)
+        if new and new.strip():
+            label_var.set(new.strip())
+
+    def _load_from_tabs(self):
+        """Nạp curl từ các tab đang mở trong app chính."""
+        app = self.parent_app
+        open_curls = []
+        for tab in app.tabs:
+            if hasattr(tab,"_curl_tw"):
+                curl = tab._curl_tw.get("1.0","end").strip()
+                if curl and not getattr(tab,"_ph_active",False):
+                    open_curls.append((tab.name, curl))
+
+        if not open_curls:
+            messagebox.showinfo("","Chưa có curl nào trong các tab đang mở."); return
+
+        # Clear existing panels
+        for p in list(self._panels):
+            self.paned.remove(p["outer"])
+            p["outer"].destroy()
+        self._panels.clear()
+
+        for name, curl in open_curls:
+            p = self._add_panel(curl)
+            p["label_var"].set(name)
+
+        if len(self._panels) < 2:
+            self._add_panel("")
+        self._run_compare()
+
+    # ── DIFF ENGINE ───────────────────────────
+    def _normalize_curl(self, raw: str) -> list[str]:
+        """
+        Chuẩn hóa curl thành danh sách các token dạng 'KEY: value'
+        để so sánh semantic, không phụ thuộc thứ tự flags.
+        """
+        # Merge line continuations
+        s = re.sub(r'\\\s*\n\s*', ' ', raw)
+        s = re.sub(r'\^\s*\n\s*', ' ', s).strip()
+
+        lines = []
+        try:
+            tokens = shlex.split(s)
+        except Exception:
+            return raw.splitlines()
+
+        if not tokens: return []
+
+        # Extract method
+        method = "GET"
+        url    = ""
+        i = 1
+        parts = []
+
+        while i < len(tokens):
+            t = tokens[i]
+            if not t.startswith('-') and not url:
+                url = t
+            elif t in ('-X','--request'):
+                i += 1
+                method = tokens[i].upper() if i < len(tokens) else method
+            elif t in ('-H','--header') and i+1 < len(tokens):
+                i += 1; parts.append(f"Header: {tokens[i]}")
+            elif t in ('-d','--data','--data-raw','--data-binary','--data-ascii') and i+1 < len(tokens):
+                i += 1
+                try:
+                    obj = json.loads(tokens[i])
+                    for k,v in (obj.items() if isinstance(obj,dict) else []):
+                        parts.append(f"Body.{k}: {json.dumps(v, ensure_ascii=False)}")
+                except Exception:
+                    parts.append(f"Body: {tokens[i]}")
+            elif t in ('-u','--user') and i+1 < len(tokens):
+                i += 1; parts.append(f"Auth: {tokens[i]}")
+            elif t in ('-k','--insecure'):
+                parts.append("Option: insecure=true")
+            elif t in ('-L','--location'):
+                parts.append("Option: follow-redirect=true")
+            elif t in ('--max-time','-m') and i+1 < len(tokens):
+                i += 1; parts.append(f"Option: timeout={tokens[i]}")
+            elif t in ('-F','--form') and i+1 < len(tokens):
+                i += 1; parts.append(f"Form: {tokens[i]}")
+            i += 1
+
+        lines = [f"Method: {method}", f"URL: {url}"] + sorted(parts)
+        return lines
+
+    def _compute_diff(self, panels_lines: list[list[str]]) -> list[list[tuple]]:
+        """
+        So sánh n danh sách dòng.
+        Trả về list[panel_idx] → list[(line_text, tag)]
+        tag: 'same' | 'changed' | 'added' | 'missing'
+        """
+        if not panels_lines: return []
+        n      = len(panels_lines)
+        max_ln = max(len(p) for p in panels_lines)
+
+        results = [[] for _ in range(n)]
+
+        for row in range(max_ln):
+            row_vals = []
+            for pi in range(n):
+                lines = panels_lines[pi]
+                row_vals.append(lines[row] if row < len(lines) else None)
+
+            present = [v for v in row_vals if v is not None]
+            all_same = len(set(present)) == 1
+
+            for pi, val in enumerate(row_vals):
+                if val is None:
+                    results[pi].append(("", "missing"))
+                elif all_same:
+                    results[pi].append((val, "same"))
+                else:
+                    # Check if this exact value appears in at least one other panel
+                    others = [row_vals[j] for j in range(n) if j != pi and row_vals[j] is not None]
+                    if val in others:
+                        # Value exists elsewhere → mark as "changed" only in panels that differ
+                        unique_vals = set(present)
+                        if len(unique_vals) == 1:
+                            results[pi].append((val, "same"))
+                        else:
+                            majority = max(set(present), key=present.count)
+                            tag = "same" if val == majority else "changed"
+                            results[pi].append((val, tag))
+                    else:
+                        results[pi].append((val, "changed"))
+
+        return results
+
+    def _run_compare(self):
+        """Parse tất cả panels, compute diff, render."""
+        if not self._panels: return
+
+        # Collect normalized lines from each panel
+        panels_lines = []
+        raw_texts    = []
+        for p in self._panels:
+            raw = p["inp_tw"].get("1.0","end").strip()
+            raw_texts.append(raw)
+            panels_lines.append(self._normalize_curl(raw) if raw else [])
+
+        diff_results = self._compute_diff(panels_lines)
+
+        # Count diffs per panel
+        total_diffs = 0
+
+        for pi, panel in enumerate(self._panels):
+            dw = panel["diff_tw"]
+            dw.config(state="normal"); dw.delete("1.0","end")
+
+            if pi >= len(diff_results):
+                dw.config(state="disabled"); continue
+
+            panel_diff = diff_results[pi]
+            diff_count = sum(1 for _, tag in panel_diff if tag != "same")
+            total_diffs = max(total_diffs, diff_count)
+
+            for ln, (text, tag) in enumerate(panel_diff, 1):
+                # Line number
+                dw.insert("end", f"{ln:>3}  ", "linenum")
+                display = text if text else "·" * 30
+                dw.insert("end", display + "\n", tag)
+
+            dw.config(state="disabled")
+
+            # Update badge
+            badge_txt  = f"  {diff_count} khác biệt" if diff_count else "  ✓ Giống"
+            badge_col  = YELLOW_C if diff_count else GREEN
+            panel["diff_badge"].config(text=badge_txt, fg=badge_col)
+
+        # Summary
+        same_count = sum(1 for _,tag in (diff_results[0] if diff_results else []) if tag=="same")
+        total      = len(diff_results[0]) if diff_results else 0
+        self.result_lbl.config(
+            text=f"  {len(self._panels)} panels  ·  {total} dòng  ·  {same_count} giống  ·  {total-same_count} khác"
+        )
+
+    # ── helpers ───────────────────────────────
+    def _mkbtn(self, parent, text, cmd, side="left", pad=(0,0)):
+        b = tk.Button(parent, text=text, font=self.fn_label,
+                      bg=BG3, fg=TEXT, activebackground=BORDER,
+                      relief="flat", cursor="hand2",
+                      padx=10, pady=5, command=cmd, bd=0)
+        b.pack(side=side, padx=pad)
+        return b
 
 # ══════════════════════════════════════════════
 if __name__ == "__main__":
