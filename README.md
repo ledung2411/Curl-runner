@@ -11,7 +11,7 @@
 
 ## 📸 Screenshot
 
-![Curl Runner Screenshot](screenshotv4.png)
+![Curl Runner Screenshot](screenshotv3.png)
 
 ---
 
