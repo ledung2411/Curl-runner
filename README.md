@@ -23,6 +23,7 @@
 | ⚡ **Pre-request Script** | Chạy Python script trước khi gửi — tự động lấy token, set biến |
 | ✨ **Beautify Body** | Format JSON body trong curl thành dạng dễ đọc |
 | 🔁 **Auto call N times** | Tự động gọi cùng request nhiều lần để test retry, cache, rate limit |
+| ▶ **API Scenario** | Lưu workflow nhiều API, chạy group tuần tự và step cùng group song song |
 | ⇄ **So sánh Curl** | Highlight điểm khác nhau giữa n curl, panel kéo thả resize |
 | 📋 **History** | Tự động lưu lịch sử request, tìm kiếm, tái sử dụng |
 | 🗂 **Collections** | Nhóm và lưu các request hay dùng |
@@ -234,6 +235,58 @@ Encoding đang dùng hiển thị trong tab **Request Info**.
 
 Giới hạn hiện tại là `1000` lần để tránh gọi API quá nhiều ngoài ý muốn.
 
+### API Scenario
+
+Nhấn **▶ Scenario** trên topbar để mở cửa sổ chạy workflow nhiều API.
+
+Scenario phù hợp cho các flow dev/test như:
+
+- Login → lấy token thủ công trong environment → gọi nhiều API dashboard
+- Tạo dữ liệu test → gọi nhiều API kiểm tra song song
+- Smoke test nhiều endpoint sau deploy
+- Kiểm tra API độc lập chạy parallel có lỗi/rate-limit không
+
+#### Cách chạy sequential và parallel
+
+Mỗi step có trường **Group**:
+
+- App chạy **Group 1**, sau đó **Group 2**, sau đó **Group 3**...
+- Các step cùng một Group chạy **song song**
+- Step ở Group sau chỉ bắt đầu khi toàn bộ Group trước chạy xong
+
+Ví dụ:
+
+| Step | Group | Cách chạy |
+|---|---:|---|
+| Login | 1 | Chạy trước |
+| Get Profile | 2 | Chạy song song với các step Group 2 |
+| Get Orders | 2 | Chạy song song với các step Group 2 |
+| Get Notifications | 2 | Chạy song song với các step Group 2 |
+| Logout | 3 | Chạy sau cùng |
+
+#### Các thao tác chính
+
+- **New / Rename / Delete** để quản lý scenario
+- **Add Step** để thêm API step mới
+- **Update Step** để lưu nội dung step đang sửa
+- **Duplicate / Delete Step / Up / Down** để chỉnh danh sách step
+- **Import Open Tabs** để tạo step từ các tab curl đang mở
+- **Run Scenario** để chạy workflow
+- **Stop** để dừng trước group tiếp theo
+- **Stop on fail** để tự dừng scenario nếu một step lỗi
+
+Kết quả chạy hiển thị trực tiếp trên bảng step và vùng log. Mỗi step có status, thời gian chạy, pass/fail. Hiện tại pass là HTTP status `2xx` hoặc `3xx`; `4xx`, `5xx` hoặc exception được xem là fail.
+
+#### Lưu ý MVP
+
+API Scenario bản đầu tập trung vào chạy sequential/parallel. Các phần nên thêm tiếp theo:
+
+- Extract variable từ response để truyền sang step sau
+- Assertions chi tiết theo status/header/body/JSON path
+- Export report HTML/CSV/JUnit
+- Delay giữa các group/step
+- Chạy scenario theo data CSV/JSON
+
 ### Tìm kiếm trong response
 
 Response panel có thanh **Search** để tìm trong tab đang mở:
@@ -355,6 +408,7 @@ Curl-runner/
 ├── store.py             # History, collections, environments
 ├── constants.py         # Theme, colors, fonts
 ├── ui_compare.py        # Compare curl popup
+├── ui_scenario.py       # API Scenario runner
 ├── ui_widgets.py        # Shared UI widgets
 ├── CurlRunner.spec      # PyInstaller spec
 └── README.md
@@ -366,7 +420,8 @@ Curl-runner/
 C:\Users\<tên>\.curl_runner\
 ├── history.json         # Lịch sử request (tối đa 500)
 ├── collections.json     # Collections
-└── environments.json    # Environments & variables
+├── environments.json    # Environments & variables
+└── scenarios.json       # API Scenario workflows
 ```
 
 ---
@@ -425,6 +480,7 @@ Thêm vào `.vscode/settings.json` để tắt Pylance warnings với tkinter:
 - [x] Pre-request Script
 - [x] Beautify JSON body
 - [x] Auto call N times
+- [x] API Scenario sequential/parallel groups
 - [x] So sánh Curl (diff n panels)
 - [x] Tìm kiếm trong response (Ctrl+F)
 - [x] AI phân tích lỗi response bằng Ollama local

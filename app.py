@@ -31,6 +31,7 @@ from core import (
 )
 import store
 from ui_compare import CurlCompareWindow
+from ui_scenario import ScenarioWindow
 
 
 class CurlRunnerApp(tk.Tk):
@@ -138,6 +139,7 @@ class CurlRunnerApp(tk.Tk):
         self.env_combo.pack(side="left", padx=4)
         self.env_combo.bind("<<ComboboxSelected>>", self._on_env_change)
         self._mkbtn(ef, "⚙ Manage",  self._open_env_editor,  side="left", pad=(4,0))
+        self._mkbtn(ef, "▶ Scenario", self._open_scenario,    side="left", pad=(10,0))
         self._mkbtn(ef, "⇄ Compare", self._open_compare,     side="left", pad=(10,0))
         self._mkbtn(ef, "🔤 Font",   self._open_font_settings, side="left", pad=(10,0))
 
@@ -1631,6 +1633,10 @@ class CurlRunnerApp(tk.Tk):
         while len(open_curls) < 2:
             open_curls.append("")
         CurlCompareWindow(self, initial_curls=open_curls)
+
+    def _open_scenario(self):
+        """Mở API Scenario runner."""
+        ScenarioWindow(self)
 
     def _open_font_settings(self) -> None:
         """Mở dialog chọn font hệ thống, apply realtime cho toàn bộ UI."""

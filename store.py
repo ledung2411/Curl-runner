@@ -10,6 +10,7 @@ DATA_DIR.mkdir(exist_ok=True)
 HIST_FILE = DATA_DIR / "history.json"
 COLL_FILE = DATA_DIR / "collections.json"
 ENV_FILE  = DATA_DIR / "environments.json"
+SCEN_FILE = DATA_DIR / "scenarios.json"
 
 
 def load(path: Path, default):
@@ -43,3 +44,9 @@ def load_environments() -> dict:
 
 def save_environments(data: dict) -> None:
     save(ENV_FILE, data)
+
+def load_scenarios() -> list:
+    return load(SCEN_FILE, [])
+
+def save_scenarios(data: list) -> None:
+    save(SCEN_FILE, data)
