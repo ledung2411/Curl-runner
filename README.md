@@ -40,7 +40,7 @@ Xem hướng dẫn chi tiết tại [USER_MANUAL.md](USER_MANUAL.md).
 | 🚀 **Large response friendly** | Giới hạn preview và bỏ syntax highlight khi response quá lớn để UI không bị lag |
 | 🔠 **Auto Decode** | Tự detect encoding từ raw bytes — UTF-8, Windows-1252, TIS-620... |
 | 💾 **Lưu response** | Export response body ra file `.json` / `.txt` |
-| 🖥 **Dark UI** | Giao diện tối theo phong cách Postman |
+| 🖥 **Clean UI** | Giao diện sáng, sạch và thân thiện theo phong cách Postman |
 
 ---
 

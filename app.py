@@ -15,7 +15,9 @@ from tkinter import ttk, filedialog, messagebox, simpledialog, font as tkfont
 
 from constants import (
     BG, BG2, BG3, SIDEBAR, BORDER,
+    CODE_BG,
     ACCENT, ACCENT2, TEXT, TEXT_DIM, TEXT_URL,
+    ACTIVE_TEXT, STATUS_TEXT,
     GREEN, RED_C, YELLOW_C, CYAN_C, MAG_C, TAB_BG,
     SURFACE_HOVER, SURFACE_ACTIVE, TITLEBAR_BG,
     FONT_FAMILY, FONT_FAMILY_MONO,
@@ -116,13 +118,15 @@ class CurlRunnerApp(tk.Tk):
 
     # ── TOP BAR ───────────────────────────────
     def _build_ui(self):
-        topbar = tk.Frame(self, bg=TITLEBAR_BG, height=52)
+        topbar = tk.Frame(self, bg=TITLEBAR_BG, height=56)
         topbar.pack(fill="x", side="top")
         topbar.pack_propagate(False)
-        tk.Label(topbar, text="  Curl Runner", font=self.fn_title,
-                 bg=TITLEBAR_BG, fg=TEXT).pack(side="left", padx=14, pady=10)
-        tk.Label(topbar, text="v4  ·  Multi-tab · Pre-script · Beautify · Compare",
-                 font=self.fn_label, bg=TITLEBAR_BG, fg=TEXT_DIM).pack(side="left", padx=(0,0))
+        brand = tk.Frame(topbar, bg=TITLEBAR_BG)
+        brand.pack(side="left", padx=18, pady=8)
+        tk.Label(brand, text="Curl Runner", font=self.fn_title,
+                 bg=TITLEBAR_BG, fg=TEXT).pack(anchor="w")
+        tk.Label(brand, text="API client · scenarios · AI analysis",
+                 font=self.fn_small, bg=TITLEBAR_BG, fg=TEXT_DIM).pack(anchor="w")
 
         ef = tk.Frame(topbar, bg=TITLEBAR_BG)
         ef.pack(side="right", padx=16)
@@ -132,7 +136,7 @@ class CurlRunnerApp(tk.Tk):
         style.configure("TCombobox",
                          fieldbackground=BG3, background=BG3,
                          foreground=TEXT, selectbackground=SURFACE_ACTIVE,
-                         selectforeground="white", arrowcolor=ACCENT)
+                         selectforeground=ACTIVE_TEXT, arrowcolor=ACCENT)
         self.env_combo = ttk.Combobox(ef, textvariable=self.env_var, width=16,
                                       state="readonly", font=self.fn_label,
                                       style="TCombobox")
@@ -159,7 +163,7 @@ class CurlRunnerApp(tk.Tk):
         for lbl, val in [("📋 History","history"),("🗂 Collections","collections")]:
             btn = tk.Button(tab_row, text=lbl, font=self.fn_small,
                             bg=SURFACE_ACTIVE if val=="history" else SIDEBAR,
-                            fg="white" if val=="history" else TEXT_DIM,
+                            fg=ACTIVE_TEXT if val=="history" else TEXT_DIM,
                             relief="flat", cursor="hand2", pady=8, bd=0,
                             command=lambda v=val: self._show_sidebar(v))
             btn.pack(side="left", fill="x", expand=True)
@@ -179,7 +183,7 @@ class CurlRunnerApp(tk.Tk):
                       ("collections",self.sidebar_collections)]:
             getattr(self, f"stab_{v}").config(
                 bg=SURFACE_ACTIVE if v==val else SIDEBAR,
-                fg="white" if v==val else TEXT_DIM)
+                fg=ACTIVE_TEXT if v==val else TEXT_DIM)
             if v == val: fr.pack(fill="both", expand=True)
             else:        fr.pack_forget()
 
@@ -201,7 +205,7 @@ class CurlRunnerApp(tk.Tk):
         sb = tk.Scrollbar(lf, bg=BG3, troughcolor=SIDEBAR, bd=0)
         sb.pack(side="right", fill="y")
         self.hist_list = tk.Listbox(lf, bg=BG2, fg=TEXT, font=self.fn_small,
-                                    selectbackground=ACCENT, selectforeground="#fff",
+                                    selectbackground=ACCENT, selectforeground=ACTIVE_TEXT,
                                     relief="flat", bd=0, activestyle="none",
                                     yscrollcommand=sb.set)
         self.hist_list.pack(fill="both", expand=True)
@@ -305,7 +309,7 @@ class CurlRunnerApp(tk.Tk):
                         fieldbackground=BG2, font=(FONT_FAMILY, 9),
                         rowheight=28, borderwidth=0)
         style.map("Treeview", background=[("selected", SURFACE_ACTIVE)],
-                  foreground=[("selected", "white")])
+                  foreground=[("selected", ACTIVE_TEXT)])
         self.coll_tree.pack(fill="both", expand=True)
         self.coll_tree.bind("<Double-Button-1>", self._load_from_collection)
         self.coll_tree.bind("<Button-3>",        self._coll_ctx)
@@ -401,7 +405,7 @@ class CurlRunnerApp(tk.Tk):
             store.save_collections(self.collections)
             self._refresh_collection_tree()
             win.destroy()
-        tk.Button(win, text="💾 Lưu", font=self.fn_btn, bg=ACCENT, fg="#fff",
+        tk.Button(win, text="💾 Lưu", font=self.fn_btn, bg=ACCENT, fg=ACTIVE_TEXT,
                   relief="flat", command=do_save, pady=6).pack(pady=14)
 
     def _rename_coll_item(self, col_name, item_id):
@@ -531,7 +535,7 @@ class CurlRunnerApp(tk.Tk):
         self._mkbtn(bf, "🗑 Xóa dòng",
                     lambda: tree.delete(tree.selection()[0]) if tree.selection() else None,
                     side="left", pad=(6,0))
-        tk.Button(bf, text="💾 Lưu & Đóng", font=self.fn_btn, bg=ACCENT, fg="#fff",
+        tk.Button(bf, text="💾 Lưu & Đóng", font=self.fn_btn, bg=ACCENT, fg=ACTIVE_TEXT,
                   relief="flat", command=save_close, pady=5, padx=14).pack(side="right")
 
     # ══ CENTER (MULTI-TAB INPUT) ══════════════
@@ -597,7 +601,7 @@ class CurlRunnerApp(tk.Tk):
         curl_tw = tk.Text(wrap, bg=BG2, fg=TEXT, insertbackground=ACCENT,
                           font=self.fn_mono, wrap="word", relief="flat",
                           padx=10, pady=8, selectbackground=ACCENT,
-                          selectforeground="#fff", undo=True, bd=0)
+                          selectforeground=ACTIVE_TEXT, undo=True, bd=0)
         sb_c = tk.Scrollbar(wrap, command=curl_tw.yview, bg=BG3, troughcolor=BG2, bd=0)
         curl_tw.configure(yscrollcommand=sb_c.set)
         sb_c.pack(side="right", fill="y")
@@ -628,10 +632,10 @@ class CurlRunnerApp(tk.Tk):
 
         pre_wrap = tk.Frame(pre_frame, bg=BORDER)
         pre_wrap.pack(fill="both", expand=True, padx=8, pady=(2,4))
-        pre_tw = tk.Text(pre_wrap, bg="#1e2430", fg=TEXT, insertbackground=ACCENT,
+        pre_tw = tk.Text(pre_wrap, bg=CODE_BG, fg=TEXT, insertbackground=ACCENT,
                          font=self.fn_mono, wrap="none", relief="flat",
                          padx=10, pady=8, selectbackground=ACCENT,
-                         selectforeground="#fff", undo=True, bd=0,
+                         selectforeground=ACTIVE_TEXT, undo=True, bd=0,
                          tabs=("28",))
         sb_p = tk.Scrollbar(pre_wrap, command=pre_tw.yview, bg=BG3, troughcolor=BG2, bd=0)
         pre_tw.configure(yscrollcommand=sb_p.set)
@@ -655,7 +659,7 @@ class CurlRunnerApp(tk.Tk):
                         padding=[12,5], font=(FONT_FAMILY, 9))
         style.map("TNotebook.Tab",
                   background=[("selected", SURFACE_ACTIVE)],
-                  foreground=[("selected", "white")])
+                  foreground=[("selected", ACTIVE_TEXT)])
 
         tab._nb = nb
 
@@ -684,8 +688,8 @@ class CurlRunnerApp(tk.Tk):
         # ── Send button
         send_btn = tk.Button(
             frame, text="▶  SEND REQUEST",
-            font=self.fn_btn, bg=ACCENT, fg="white",
-            activebackground=ACCENT2, activeforeground="white",
+            font=self.fn_btn, bg=ACCENT, fg=ACTIVE_TEXT,
+            activebackground=ACCENT2, activeforeground=ACTIVE_TEXT,
             relief="flat", cursor="hand2", padx=20, pady=8,
             command=lambda t=tab: self._send(t)
         )
@@ -1043,7 +1047,7 @@ class CurlRunnerApp(tk.Tk):
         for lbl, val in [("Body","body"),("Headers","headers"),("Info","info"),("Log","log"),("AI","ai")]:
             btn = tk.Button(tr, text=lbl, font=self.fn_label,
                             bg=SURFACE_ACTIVE if val=="body" else BG3,
-                            fg="white" if val=="body" else TEXT_DIM,
+                            fg=ACTIVE_TEXT if val=="body" else TEXT_DIM,
                             relief="flat", cursor="hand2", padx=14, pady=6,
                             command=lambda v=val: self._show_resp_tab(v), bd=0)
             btn.pack(side="left", padx=(1,0), pady=1)
@@ -1109,8 +1113,8 @@ class CurlRunnerApp(tk.Tk):
         self.ai_tw.tag_configure("dim", foreground=TEXT_DIM)
         self.ai_tw.tag_configure("err", foreground=RED_C)
         for tw in (self.body_tw, self.headers_tw, self.info_tw, self.log_tw, self.ai_tw):
-            tw.tag_configure("search_match", background="#5b3a22", foreground=TEXT)
-            tw.tag_configure("search_current", background=ACCENT, foreground="#171717")
+            tw.tag_configure("search_match", background="#ffe4d6", foreground=TEXT)
+            tw.tag_configure("search_current", background=ACCENT, foreground=ACTIVE_TEXT)
             tw.tag_raise("search_current")
 
         self._show_resp_tab("body")
@@ -1122,7 +1126,8 @@ class CurlRunnerApp(tk.Tk):
         wrap.pack(fill="both", expand=True)
         tw = tk.Text(wrap, bg=BG2, fg=TEXT, font=fnt,
                      wrap="word", relief="flat", padx=10, pady=8,
-                     selectbackground=ACCENT, state="disabled", bd=0)
+                     selectbackground=ACCENT, selectforeground=ACTIVE_TEXT,
+                     state="disabled", bd=0)
         sb = tk.Scrollbar(wrap, command=tw.yview, bg=BG3, troughcolor=BG2, bd=0)
         tw.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y"); tw.pack(fill="both", expand=True, padx=1, pady=1)
@@ -1151,7 +1156,7 @@ class CurlRunnerApp(tk.Tk):
             btn = _btns.get(v)
             if btn: btn.config(
                 bg=SURFACE_ACTIVE if v==val else BG3,
-                fg="white" if v==val else TEXT_DIM)
+                fg=ACTIVE_TEXT if v==val else TEXT_DIM)
         target = _frames.get(val)
         if target: target.pack(fill="both", expand=True)
         self._schedule_response_search()
@@ -1312,7 +1317,7 @@ class CurlRunnerApp(tk.Tk):
         sc      = resp.status_code
         elapsed = tab.elapsed or 0
         size    = len(resp.content)
-        self.status_badge.config(text=f"{sc} {resp.reason}", bg=status_color(sc), fg="#171717")
+        self.status_badge.config(text=f"{sc} {resp.reason}", bg=status_color(sc), fg=STATUS_TEXT)
         self.time_label.config(text=f"{elapsed:.0f} ms", fg=YELLOW_C)
         sz = f"{size:,} B" if size < 1024 else f"{size/1024:.1f} KB"
         self.size_label.config(text=sz, fg=TEXT_DIM)
@@ -1333,7 +1338,7 @@ class CurlRunnerApp(tk.Tk):
 
         sc   = resp.status_code
         size = len(resp.content)
-        self.status_badge.config(text=f"{sc} {resp.reason}", bg=status_color(sc), fg="#171717")
+        self.status_badge.config(text=f"{sc} {resp.reason}", bg=status_color(sc), fg=STATUS_TEXT)
         self.time_label.config(text=f"{elapsed:.0f} ms", fg=YELLOW_C)
         sz = f"{size:,} B" if size < 1024 else f"{size/1024:.1f} KB"
         self.size_label.config(text=sz, fg=TEXT_DIM)
@@ -1580,7 +1585,7 @@ class CurlRunnerApp(tk.Tk):
 
     def _show_error(self, tab, msg):
         tab._send_btn.config(state="normal", text="▶  SEND REQUEST")
-        self.status_badge.config(text="ERROR", bg=RED_C, fg="#171717")
+        self.status_badge.config(text="ERROR", bg=RED_C, fg=STATUS_TEXT)
         tab._status_lbl.config(text=f"❌ {msg[:80]}", fg=RED_C)
         self._write_body(f"[LỖI]\n{msg}", "text/plain")
         self._schedule_response_search()
@@ -1615,9 +1620,12 @@ class CurlRunnerApp(tk.Tk):
 
     def _mkbtn(self, parent, text, cmd, side="left", pad=(0,0)):
         b = tk.Button(parent, text=text, font=self.fn_label,
-                      bg=BG3, fg=TEXT, activebackground=BORDER,
+                      bg=BG3, fg=TEXT, activebackground=SURFACE_HOVER,
+                      activeforeground=TEXT,
                       relief="flat", cursor="hand2",
                       padx=10, pady=4, command=cmd, bd=0)
+        b.bind("<Enter>", lambda _e: b.config(bg=SURFACE_HOVER) if str(b["state"]) == "normal" else None)
+        b.bind("<Leave>", lambda _e: b.config(bg=BG3) if str(b["state"]) == "normal" else None)
         b.pack(side=side, padx=pad)
         return b
 
@@ -1727,7 +1735,7 @@ class CurlRunnerApp(tk.Tk):
         ui_sb.pack(side="right", fill="y")
         ui_listbox = tk.Listbox(ui_list_frame, bg=BG2, fg=TEXT,
                                 font=tkfont.Font(family=FONT_FAMILY, size=9),
-                                selectbackground=SURFACE_ACTIVE, selectforeground="white",
+                                selectbackground=SURFACE_ACTIVE, selectforeground=ACTIVE_TEXT,
                                 relief="flat", bd=0, height=8, activestyle="none",
                                 yscrollcommand=ui_sb.set)
         ui_listbox.pack(fill="x", padx=1, pady=1)
@@ -1807,7 +1815,7 @@ class CurlRunnerApp(tk.Tk):
         mono_sb.pack(side="right", fill="y")
         mono_listbox = tk.Listbox(mono_list_frame, bg=BG2, fg=TEXT,
                                   font=tkfont.Font(family=FONT_FAMILY, size=9),
-                                  selectbackground=SURFACE_ACTIVE, selectforeground="white",
+                                  selectbackground=SURFACE_ACTIVE, selectforeground=ACTIVE_TEXT,
                                   relief="flat", bd=0, height=6, activestyle="none",
                                   yscrollcommand=mono_sb.set)
         mono_listbox.pack(fill="x", padx=1, pady=1)
@@ -1944,13 +1952,13 @@ class CurlRunnerApp(tk.Tk):
 
         tk.Button(btn_row, text="✓  Apply",
                   font=tkfont.Font(family=FONT_FAMILY, size=9, weight="bold"),
-                  bg=ACCENT, fg="white", activebackground=ACCENT2,
+                  bg=ACCENT, fg=ACTIVE_TEXT, activebackground=ACCENT2,
                   relief="flat", cursor="hand2", padx=20, pady=6,
                   command=_apply, bd=0).pack(side="right")
 
         tk.Button(btn_row, text="Apply & Đóng",
                   font=tkfont.Font(family=FONT_FAMILY, size=9),
-                  bg=SURFACE_ACTIVE, fg="white", activebackground=ACCENT,
+                  bg=SURFACE_ACTIVE, fg=ACTIVE_TEXT, activebackground=ACCENT,
                   relief="flat", cursor="hand2", padx=14, pady=6,
                   command=lambda: (_apply(), win.destroy()), bd=0).pack(side="right", padx=(0,8))
 
@@ -1965,7 +1973,7 @@ class CurlRunnerApp(tk.Tk):
         tk.Label(toast,
                  text=f"✓  Font applied  —  UI: {ui_font[:20]}  ·  Mono: {mono_font[:20]}",
                  font=tkfont.Font(family=FONT_FAMILY, size=9),
-                 bg=SURFACE_ACTIVE, fg="white", padx=16, pady=8).pack()
+                 bg=SURFACE_ACTIVE, fg=ACTIVE_TEXT, padx=16, pady=8).pack()
 
         # Position bottom-right of main window
         self.update_idletasks()
@@ -2016,4 +2024,5 @@ class CurlRunnerApp(tk.Tk):
         tk.Checkbutton(parent, text=text, variable=var,
                        font=self.fn_label, bg=BG, fg=TEXT_DIM,
                        activebackground=BG, selectcolor=BG3,
+                       activeforeground=TEXT, cursor="hand2",
                        relief="flat", bd=0).pack(side="left", padx=(0,8))

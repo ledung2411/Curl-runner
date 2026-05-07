@@ -13,8 +13,9 @@ from typing import TYPE_CHECKING, Any
 
 from constants import (
     BG, BG2, BG3, BORDER, ACCENT, TEXT, TEXT_DIM,
+    ACTIVE_TEXT,
     GREEN, RED_C, YELLOW_C,
-    SURFACE_ACTIVE, TITLEBAR_BG, FONT_FAMILY, FONT_FAMILY_MONO,
+    SURFACE_HOVER, SURFACE_ACTIVE, TITLEBAR_BG, FONT_FAMILY, FONT_FAMILY_MONO,
 )
 from core import apply_env, parse_curl, execute_request, decode_response
 import store
@@ -94,7 +95,7 @@ class ScenarioWindow(tk.Toplevel):
         sb.pack(side="right", fill="y")
         self.scenario_list = tk.Listbox(
             lb_wrap, bg=BG2, fg=TEXT, font=self.fn_label,
-            selectbackground=ACCENT, selectforeground="#171717",
+            selectbackground=ACCENT, selectforeground=ACTIVE_TEXT,
             relief="flat", bd=0, activestyle="none", yscrollcommand=sb.set
         )
         self.scenario_list.pack(fill="both", expand=True, padx=1, pady=1)
@@ -118,7 +119,7 @@ class ScenarioWindow(tk.Toplevel):
             controls, text="Stop on fail", variable=self.stop_on_fail_var,
             font=self.fn_label, bg=BG, fg=TEXT_DIM,
             activebackground=BG, activeforeground=TEXT,
-            selectcolor=BG3, bd=0
+            selectcolor=BG3, cursor="hand2", bd=0
         ).pack(side="right", padx=(0, 12))
 
         self.summary_lbl = tk.Label(right, text="", font=self.fn_small,
@@ -127,6 +128,21 @@ class ScenarioWindow(tk.Toplevel):
 
         tree_wrap = tk.Frame(right, bg=BORDER)
         tree_wrap.pack(fill="both", expand=True)
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure(
+            "Treeview", background=BG2, foreground=TEXT,
+            fieldbackground=BG2, font=(FONT_FAMILY, 9),
+            rowheight=29, borderwidth=0,
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", SURFACE_ACTIVE)],
+            foreground=[("selected", ACTIVE_TEXT)],
+        )
         cols = ("order", "group", "enabled", "name", "method", "url", "status", "time")
         self.step_tree = ttk.Treeview(tree_wrap, columns=cols, show="headings", height=10)
         headings = {
@@ -169,7 +185,7 @@ class ScenarioWindow(tk.Toplevel):
             meta, text="Enabled", variable=self.step_enabled_var,
             font=self.fn_label, bg=BG2, fg=TEXT_DIM,
             activebackground=BG2, activeforeground=TEXT,
-            selectcolor=BG3, bd=0
+            selectcolor=BG3, cursor="hand2", bd=0
         ).pack(side="left")
         tk.Label(meta, text="Steps with the same Group run in parallel; groups run sequentially.",
                  font=self.fn_small, bg=BG2, fg=TEXT_DIM).pack(side="right")
@@ -180,7 +196,7 @@ class ScenarioWindow(tk.Toplevel):
             curl_wrap, bg=BG2, fg=TEXT, insertbackground=ACCENT,
             font=self.fn_mono, wrap="word", relief="flat",
             padx=10, pady=8, selectbackground=ACCENT,
-            selectforeground="#171717", undo=True, bd=0, height=7
+            selectforeground=ACTIVE_TEXT, undo=True, bd=0, height=7
         )
         curl_sb = tk.Scrollbar(curl_wrap, command=self.step_curl_tw.yview,
                                bg=BG3, troughcolor=BG2, bd=0)
@@ -209,7 +225,7 @@ class ScenarioWindow(tk.Toplevel):
         self.log_tw = tk.Text(
             log_wrap, bg=BG2, fg=TEXT, font=self.fn_monos,
             wrap="word", relief="flat", padx=10, pady=8,
-            selectbackground=ACCENT, selectforeground="#171717",
+            selectbackground=ACCENT, selectforeground=ACTIVE_TEXT,
             state="disabled", bd=0, height=7
         )
         log_sb = tk.Scrollbar(log_wrap, command=self.log_tw.yview,
@@ -236,7 +252,7 @@ class ScenarioWindow(tk.Toplevel):
             wrap, bg=BG2, fg=TEXT, insertbackground=ACCENT,
             font=self.fn_monos, wrap="word", relief="flat",
             padx=8, pady=6, selectbackground=ACCENT,
-            selectforeground="#171717", undo=True, bd=0, height=5
+            selectforeground=ACTIVE_TEXT, undo=True, bd=0, height=5
         )
         sb = tk.Scrollbar(wrap, command=tw.yview, bg=BG3, troughcolor=BG2, bd=0)
         tw.configure(yscrollcommand=sb.set)
@@ -844,8 +860,11 @@ class ScenarioWindow(tk.Toplevel):
 
     def _mkbtn(self, parent: tk.Widget, text: str, cmd, side: str = "left", pad=(0, 0)):
         b = tk.Button(parent, text=text, font=self.fn_label,
-                      bg=BG3, fg=TEXT, activebackground=BORDER,
+                      bg=BG3, fg=TEXT, activebackground=SURFACE_HOVER,
+                      activeforeground=TEXT,
                       relief="flat", cursor="hand2",
                       padx=10, pady=4, command=cmd, bd=0)
+        b.bind("<Enter>", lambda _e: b.config(bg=SURFACE_HOVER) if str(b["state"]) == "normal" else None)
+        b.bind("<Leave>", lambda _e: b.config(bg=BG3) if str(b["state"]) == "normal" else None)
         b.pack(side=side, padx=pad)
         return b

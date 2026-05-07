@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import font as tkfont
 from constants import (
     BG, BG3, BORDER, TEXT, TEXT_DIM, ACCENT, FONT_FAMILY, FONT_FAMILY_MONO,
+    ACTIVE_TEXT, SURFACE_HOVER,
 )
 
 
@@ -11,11 +12,14 @@ def make_button(parent: tk.Widget, text: str, cmd,
                 font: tkfont.Font,
                 side: str = "left",
                 pad: tuple[int, int] = (0, 0)) -> tk.Button:
-    """Button theo style dark theme của app."""
+    """Button theo style clean theme của app."""
     b = tk.Button(parent, text=text, font=font,
-                  bg=BG3, fg=TEXT, activebackground=BORDER,
+                  bg=BG3, fg=TEXT, activebackground=SURFACE_HOVER,
+                  activeforeground=TEXT,
                   relief="flat", cursor="hand2",
                   padx=10, pady=4, command=cmd, bd=0)
+    b.bind("<Enter>", lambda _e: b.config(bg=SURFACE_HOVER) if str(b["state"]) == "normal" else None)
+    b.bind("<Leave>", lambda _e: b.config(bg=BG3) if str(b["state"]) == "normal" else None)
     b.pack(side=side, padx=pad)
     return b
 
@@ -35,7 +39,7 @@ def make_scrolled_text(parent: tk.Widget,
     tw = tk.Text(wrap_frame, bg=BG2, fg=TEXT, font=font,
                  wrap=wrap, relief="flat", padx=10, pady=8,
                  insertbackground=ACCENT,
-                 selectbackground=ACCENT, selectforeground="#fff",
+                 selectbackground=ACCENT, selectforeground=ACTIVE_TEXT,
                  state=state, bd=0, undo=True)
 
     sb_y = tk.Scrollbar(wrap_frame, command=tw.yview,
@@ -68,11 +72,12 @@ def make_section_label(parent: tk.Widget, text: str,
 def make_checkbox(parent: tk.Widget, text: str,
                   var: tk.BooleanVar,
                   font: tkfont.Font) -> tk.Checkbutton:
-    """Checkbox theo style dark theme."""
+    """Checkbox theo style clean theme."""
     from constants import BG3
     cb = tk.Checkbutton(parent, text=text, variable=var,
                         font=font, bg=BG, fg=TEXT_DIM,
                         activebackground=BG, selectcolor=BG3,
+                        activeforeground=TEXT,
                         relief="flat", bd=0)
     cb.pack(side="left", padx=(0, 8))
     return cb

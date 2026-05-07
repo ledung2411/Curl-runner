@@ -11,8 +11,9 @@ from typing import TYPE_CHECKING
 
 from constants import (
     BG, BG2, BG3, BORDER, ACCENT, TEXT, TEXT_DIM,
+    ACTIVE_TEXT,
     GREEN, RED_C, YELLOW_C,
-    SURFACE_ACTIVE, TITLEBAR_BG, FONT_FAMILY, FONT_FAMILY_MONO,
+    SURFACE_HOVER, SURFACE_ACTIVE, TITLEBAR_BG, FONT_FAMILY, FONT_FAMILY_MONO,
 )
 
 if TYPE_CHECKING:
@@ -28,13 +29,13 @@ class CurlCompareWindow(tk.Toplevel):
     """
 
     # Diff highlight colors
-    HL_ADDED   = "#1e3a1e"
-    HL_CHANGED = "#3a2e10"
+    HL_ADDED   = "#e9f8ef"
+    HL_CHANGED = "#fff5d6"
     HL_SAME    = BG2
-    HL_MISSING = "#2a1a1a"
-    FG_ADDED   = "#6fcf6f"
-    FG_CHANGED = "#f0c060"
-    FG_MISSING = "#555b70"
+    HL_MISSING = "#f1f3f7"
+    FG_ADDED   = "#18794e"
+    FG_CHANGED = "#946200"
+    FG_MISSING = "#8b95a5"
 
     def __init__(self, parent: "CurlRunnerApp", initial_curls: list[str] | None = None):
         super().__init__(parent)
@@ -118,15 +119,16 @@ class CurlCompareWindow(tk.Toplevel):
 
         label_var = tk.StringVar(value=name)
         lbl = tk.Label(hdr, textvariable=label_var, font=self.fn_label,
-                       bg=SURFACE_ACTIVE, fg="white", cursor="hand2")
+                       bg=SURFACE_ACTIVE, fg=ACTIVE_TEXT, cursor="hand2")
         lbl.pack(side="left", padx=8)
         lbl.bind("<Double-Button-1>", lambda e, lv=label_var: self._rename_panel(lv))
 
-        diff_badge = tk.Label(hdr, text="", font=self.fn_small, bg=SURFACE_ACTIVE, fg="white")
+        diff_badge = tk.Label(hdr, text="", font=self.fn_small, bg=SURFACE_ACTIVE, fg=ACTIVE_TEXT)
         diff_badge.pack(side="left", padx=4)
 
         tk.Button(hdr, text="✕", font=self.fn_small,
-                  bg=SURFACE_ACTIVE, fg="white", activebackground=RED_C,
+                  bg=SURFACE_ACTIVE, fg=ACTIVE_TEXT, activebackground=RED_C,
+                  activeforeground=ACTIVE_TEXT,
                   relief="flat", cursor="hand2", bd=0, padx=6,
                   command=lambda o=outer: self._remove_panel(o)).pack(side="right", padx=4)
 
@@ -145,7 +147,7 @@ class CurlCompareWindow(tk.Toplevel):
         inp_tw = tk.Text(inp_wrap, bg=BG2, fg=TEXT, font=self.fn_mono,
                          wrap="none", relief="flat", padx=8, pady=6,
                          insertbackground=ACCENT,
-                         selectbackground=ACCENT, selectforeground="#fff",
+                         selectbackground=ACCENT, selectforeground=ACTIVE_TEXT,
                          undo=True, bd=0)
         sb_x = tk.Scrollbar(inp_wrap, orient="horizontal",
                              command=inp_tw.xview, bg=BG3, troughcolor=BG2, bd=0)
@@ -367,8 +369,11 @@ class CurlCompareWindow(tk.Toplevel):
     def _mkbtn(self, parent: tk.Widget, text: str, cmd,
                side: str = "left", pad: tuple = (0, 0)) -> tk.Button:
         b = tk.Button(parent, text=text, font=self.fn_label,
-                      bg=BG3, fg=TEXT, activebackground=BORDER,
+                      bg=BG3, fg=TEXT, activebackground=SURFACE_HOVER,
+                      activeforeground=TEXT,
                       relief="flat", cursor="hand2",
                       padx=10, pady=5, command=cmd, bd=0)
+        b.bind("<Enter>", lambda _e: b.config(bg=SURFACE_HOVER) if str(b["state"]) == "normal" else None)
+        b.bind("<Leave>", lambda _e: b.config(bg=BG3) if str(b["state"]) == "normal" else None)
         b.pack(side=side, padx=pad)
         return b
