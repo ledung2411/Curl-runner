@@ -1,269 +1,54 @@
-#!/usr/bin/env python3
-# pyright: basic
-"""
-curl_runner_gui.py — Curl Runner Desktop (v3)
-Tính năng mới: Multi-tab · Pre-request Script · Beautify Body
-Chạy  : python curl_runner_gui.py
-Exe   : python -m PyInstaller --onefile --noconsole --name CurlRunner curl_runner_gui.py
-"""
+# app.py — CurlRunnerApp: main application window
+# Orchestrates all UI panels and business logic
 
-import sys, re, json, time, shlex, threading, os, uuid
+from __future__ import annotations
+
+import re
+import uuid
+import json
+import os
+import threading
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog, font as tkfont
 
-try:
-    import requests
-except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "requests"])
-    import requests
+from constants import (
+    BG, BG2, BG3, SIDEBAR, BORDER,
+    ACCENT, ACCENT2, TEXT, TEXT_DIM, TEXT_URL,
+    GREEN, RED_C, YELLOW_C, CYAN_C, MAG_C, TAB_BG,
+    SURFACE_HOVER, SURFACE_ACTIVE, TITLEBAR_BG,
+    FONT_FAMILY, FONT_FAMILY_MONO,
+    METHOD_COLORS, status_color,
+)
+from models import RequestTab
+from core import (
+    apply_env, run_pre_script,
+    parse_curl, execute_request,
+    decode_response, beautify_curl_body,
+    build_ai_response_context, analyze_response_with_ai,
+    analyze_response_with_ollama, OLLAMA_DEFAULT_BASE_URL,
+)
+import store
+from ui_compare import CurlCompareWindow
 
-try:
-    from charset_normalizer import from_bytes as detect_encoding
-    HAS_DETECT = True
-except ImportError:
-    try:
-        from chardet import detect as _chardet_detect
-        def detect_encoding(raw):
-            class _R:
-                best = type("B", (), {"encoding": _chardet_detect(raw).get("encoding","utf-8")})()
-            return _R()
-        HAS_DETECT = True
-    except ImportError:
-        HAS_DETECT = False
 
-# ══════════════════════════════════════════════
-# DATA STORE
-# ══════════════════════════════════════════════
-DATA_DIR  = Path(os.path.expanduser("~")) / ".curl_runner"
-DATA_DIR.mkdir(exist_ok=True)
-HIST_FILE = DATA_DIR / "history.json"
-COLL_FILE = DATA_DIR / "collections.json"
-ENV_FILE  = DATA_DIR / "environments.json"
-
-def _load(path, default):
-    try:    return json.loads(path.read_text(encoding="utf-8"))
-    except: return default
-
-def _save(path, data):
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-# ══════════════════════════════════════════════
-# CORE LOGIC
-# ══════════════════════════════════════════════
-def apply_env(text: str, env: dict) -> str:
-    for k, v in env.items():
-        text = text.replace("{{" + k + "}}", v)
-    return text
-
-def run_pre_script(script: str, env: dict) -> tuple[dict, list[str]]:
-    """
-    Chạy pre-request script Python nhỏ.
-    Script có thể dùng:
-      env['token'] = '...'       → set biến env
-      set_env('key', 'value')    → alias tiện hơn
-      log('message')             → in ra console log
-    Trả về (env_updated, logs)
-    """
-    logs   = []
-    local_env = dict(env)
-
-    def set_env(k, v):
-        local_env[k] = str(v)
-        logs.append(f"✓ set_env({k!r}, {str(v)[:40]!r})")
-
-    def log(msg):
-        logs.append(f"  {msg}")
-
-    sandbox = {
-        "env":     local_env,
-        "set_env": set_env,
-        "log":     log,
-        "requests": requests,
-        "json":    json,
-        "re":      re,
-    }
-    try:
-        exec(compile(script, "<pre-request>", "exec"), sandbox)
-        # Sync back any direct env['key'] = val assignments
-        for k, v in sandbox["env"].items():
-            local_env[k] = v
-        logs.insert(0, "✅ Script chạy thành công")
-    except Exception as e:
-        logs.insert(0, f"❌ Script lỗi: {e}")
-
-    return local_env, logs
-
-def parse_curl(curl_string: str) -> dict:
-    curl_string = re.sub(r'\\\s*\n\s*', ' ', curl_string)
-    curl_string = re.sub(r'\^\s*\n\s*', ' ', curl_string)
-    curl_string = curl_string.strip()
-    try:    tokens = shlex.split(curl_string)
-    except ValueError as e: raise ValueError(f"Không thể parse curl: {e}")
-    if not tokens or tokens[0].lower() != 'curl':
-        raise ValueError("Chuỗi phải bắt đầu bằng 'curl'")
-
-    r = {"method": None, "url": None, "headers": {}, "body": None,
-         "auth": None, "verify_ssl": True, "allow_redirects": True, "timeout": 30}
-    i = 1
-    while i < len(tokens):
-        t = tokens[i]
-        if not t.startswith('-') and r["url"] is None:
-            r["url"] = t; i += 1; continue
-        if t in ('-X', '--request'):
-            i += 1; r["method"] = tokens[i].upper()
-        elif t in ('-H', '--header'):
-            i += 1
-            if ':' in tokens[i]:
-                k, _, v = tokens[i].partition(':')
-                r["headers"][k.strip()] = v.strip()
-        elif t in ('-d', '--data', '--data-raw', '--data-ascii', '--data-binary'):
-            i += 1
-            raw = tokens[i]
-            r["body"] = open(raw[1:], 'rb').read() if raw.startswith('@') else raw
-        elif t in ('-F', '--form'):
-            i += 1
-            if r["body"] is None: r["body"] = {}
-            k, _, v = tokens[i].partition('=')
-            if isinstance(r["body"], dict): r["body"][k] = v
-        elif t in ('-A', '--user-agent'):
-            i += 1; r["headers"]["User-Agent"] = tokens[i]
-        elif t in ('-u', '--user'):
-            i += 1; r["auth"] = tuple(tokens[i].split(':', 1))
-        elif t in ('-k', '--insecure'):   r["verify_ssl"] = False
-        elif t in ('-L', '--location'):   r["allow_redirects"] = True
-        elif t == '--url':
-            i += 1; r["url"] = tokens[i]
-        elif t in ('--max-time', '-m'):
-            i += 1
-            try: r["timeout"] = float(tokens[i])
-            except: pass
-        elif t == '--oauth2-bearer':
-            i += 1; r["headers"]["Authorization"] = f"Bearer {tokens[i]}"
-        i += 1
-
-    if r["url"] is None:    raise ValueError("Không tìm thấy URL trong chuỗi curl")
-    if r["method"] is None: r["method"] = "POST" if r["body"] else "GET"
-    return r
-
-def execute_request(parsed: dict):
-    kwargs = {
-        "headers": parsed["headers"], "auth": parsed["auth"],
-        "verify":  parsed["verify_ssl"], "allow_redirects": parsed["allow_redirects"],
-        "timeout": parsed["timeout"],
-    }
-    body = parsed["body"]
-    if isinstance(body, dict):
-        kwargs["files"] = body
-    elif isinstance(body, str):
-        ct = parsed["headers"].get("Content-Type", parsed["headers"].get("content-type", ""))
-        if "application/json" in ct:
-            try:    kwargs["json"] = json.loads(body)
-            except: kwargs["data"] = body
-        else:
-            kwargs["data"] = body
-    elif isinstance(body, bytes):
-        kwargs["data"] = body
-    t0 = time.time()
-    resp = requests.request(parsed["method"], parsed["url"], **kwargs)
-    return resp, (time.time() - t0) * 1000
-
-def beautify_curl_body(curl_str: str) -> str:
-    """
-    Tìm -d / --data-raw trong curl string, format JSON body nếu có.
-    Trả về curl string đã được format.
-    """
-    pattern = re.compile(
-        r"(-d|--data|--data-raw|--data-binary|--data-ascii)\s+"
-        r"('(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\")",
-        re.DOTALL
-    )
-    def _fmt(m):
-        flag  = m.group(1)
-        raw   = m.group(2)
-        quote = raw[0]
-        inner = raw[1:-1]
-        # unescape inner quotes
-        inner_unesc = inner.replace(f"\\{quote}", quote)
-        try:
-            obj    = json.loads(inner_unesc)
-            pretty = json.dumps(obj, indent=2, ensure_ascii=False)
-            # re-escape for the original quote style
-            pretty_esc = pretty.replace(quote, f"\\{quote}")
-            return f"{flag} {quote}{pretty_esc}{quote}"
-        except Exception:
-            return m.group(0)
-    return pattern.sub(_fmt, curl_str)
-
-# ══════════════════════════════════════════════
-# THEME
-# ══════════════════════════════════════════════
-BG       = "#1a1d23"
-BG2      = "#22262f"
-BG3      = "#2a2f3a"
-SIDEBAR  = "#181b20"
-BORDER   = "#353b4a"
-ACCENT   = "#e8642a"
-ACCENT2  = "#f0883e"
-TEXT     = "#e8eaf0"
-TEXT_DIM = "#7a8099"
-TEXT_URL = "#a8d8f0"
-GREEN    = "#4caf7d"
-RED_C    = "#f06060"
-YELLOW_C = "#f0c060"
-CYAN_C   = "#60c8f0"
-MAG_C    = "#c060f0"
-TAB_BG   = "#20242c"
-
-METHOD_COLORS = {
-    "GET": "#4caf7d", "POST": "#e8642a", "PUT": "#f0c060",
-    "PATCH": "#c060f0", "DELETE": "#f06060",
-    "HEAD": "#60c8f0", "OPTIONS": "#7a8099",
-}
-
-def status_color(code):
-    if 200 <= code < 300: return GREEN
-    if 300 <= code < 400: return YELLOW_C
-    if 400 <= code < 500: return RED_C
-    return MAG_C
-
-# ══════════════════════════════════════════════
-# TAB DATA MODEL
-# ══════════════════════════════════════════════
-class RequestTab:
-    """Lưu toàn bộ state của 1 tab request."""
-    _counter = 0
-
-    def __init__(self, name=None, curl="", pre_script=""):
-        RequestTab._counter += 1
-        self.id         = str(uuid.uuid4())[:8]
-        self.name       = name or f"Tab {RequestTab._counter}"
-        self.curl       = curl
-        self.pre_script = pre_script
-        # Response state
-        self.response       = None
-        self.parsed         = None
-        self.elapsed        = None
-        self.body_text      = ""
-        self.detected_enc   = ""
-        self.pre_logs       = []
-
-# ══════════════════════════════════════════════
-# MAIN APP
-# ══════════════════════════════════════════════
 class CurlRunnerApp(tk.Tk):
+    RESPONSE_PREVIEW_LIMIT = 4_000_000
+    JSON_PRETTY_LIMIT = 1_500_000
+    JSON_HIGHLIGHT_LIMIT = 250_000
+    SEARCH_HIGHLIGHT_LIMIT = 1000
+
     def __init__(self):
         super().__init__()
-        self.title("Curl Runner v3")
-        self.geometry("1380x860")
-        self.minsize(960, 640)
+        self.title("Curl Runner")
+        self.geometry("1400x880")
+        self.minsize(980, 660)
         self.configure(bg=BG)
 
-        self.history      = _load(HIST_FILE, [])
-        self.collections  = _load(COLL_FILE, {})
-        self.environments = _load(ENV_FILE,  {"Default": {}})
+        self.history      = store.load_history()
+        self.collections  = store.load_collections()
+        self.environments = store.load_environments()
         self.active_env   = list(self.environments.keys())[0]
 
         # Multi-tab state
@@ -276,19 +61,34 @@ class CurlRunnerApp(tk.Tk):
         self.headers_tw:  tk.Text  = None  # type: ignore
         self.info_tw:     tk.Text  = None  # type: ignore
         self.log_tw:      tk.Text  = None  # type: ignore
+        self.ai_tw:       tk.Text  = None  # type: ignore
         self.body_frame:    tk.Frame = None  # type: ignore
         self.headers_frame: tk.Frame = None  # type: ignore
         self.info_frame:    tk.Frame = None  # type: ignore
         self.log_frame:     tk.Frame = None  # type: ignore
+        self.ai_frame:      tk.Frame = None  # type: ignore
         self.stab_history:     tk.Button = None  # type: ignore
         self.stab_collections: tk.Button = None  # type: ignore
         self.rtab_body:    tk.Button = None  # type: ignore
         self.rtab_headers: tk.Button = None  # type: ignore
         self.rtab_info:    tk.Button = None  # type: ignore
         self.rtab_log:     tk.Button = None  # type: ignore
+        self.rtab_ai:      tk.Button = None  # type: ignore
+        self.ai_analyze_btn: tk.Button = None  # type: ignore
+        self.openai_api_key = ""
+        self.active_resp_tab = "body"
+        self.resp_search_var: tk.StringVar = None  # type: ignore
+        self.resp_case_var: tk.BooleanVar = None  # type: ignore
+        self.resp_search_entry: tk.Entry = None  # type: ignore
+        self.resp_search_count_lbl: tk.Label = None  # type: ignore
+        self.response_search_after: str | None = None
+        self.response_matches: list[tuple[str, str]] = []
+        self.response_match_index = -1
+        self.response_match_overflow = False
 
         self._setup_fonts()
         self._build_ui()
+        self._load_font_settings()   # Restore saved font settings
         self._new_tab()   # Start with 1 blank tab
         self._refresh_history_list()
         self._refresh_collection_tree()
@@ -296,36 +96,46 @@ class CurlRunnerApp(tk.Tk):
 
     # ── FONTS ─────────────────────────────────
     def _setup_fonts(self):
-        self.fn_mono  = tkfont.Font(family="Consolas", size=10)
-        self.fn_monos = tkfont.Font(family="Consolas", size=9)
-        self.fn_title = tkfont.Font(family="Segoe UI", size=13, weight="bold")
-        self.fn_label = tkfont.Font(family="Segoe UI", size=9)
-        self.fn_btn   = tkfont.Font(family="Segoe UI", size=9,  weight="bold")
-        self.fn_stat  = tkfont.Font(family="Segoe UI", size=11, weight="bold")
-        self.fn_badge = tkfont.Font(family="Segoe UI", size=8,  weight="bold")
-        self.fn_small = tkfont.Font(family="Segoe UI", size=8)
-        self.fn_tab   = tkfont.Font(family="Segoe UI", size=9)
+        # Windows 11 Fluent Design typography
+        # Primary: Segoe UI Variable (Win11), fallback Segoe UI
+        # Mono:    Cascadia Code (Win11 Terminal), fallback Consolas
+        self.fn_mono  = tkfont.Font(family=FONT_FAMILY_MONO, size=10)
+        self.fn_monos = tkfont.Font(family=FONT_FAMILY_MONO, size=9)
+        self.fn_title = tkfont.Font(family=FONT_FAMILY, size=14, weight="bold")
+        self.fn_label = tkfont.Font(family=FONT_FAMILY, size=9)
+        self.fn_btn   = tkfont.Font(family=FONT_FAMILY, size=9,  weight="bold")
+        self.fn_stat  = tkfont.Font(family=FONT_FAMILY, size=12, weight="bold")
+        self.fn_badge = tkfont.Font(family=FONT_FAMILY, size=8,  weight="bold")
+        self.fn_small = tkfont.Font(family=FONT_FAMILY, size=8)
+        self.fn_tab   = tkfont.Font(family=FONT_FAMILY, size=9)
 
     # ── TOP BAR ───────────────────────────────
     def _build_ui(self):
-        topbar = tk.Frame(self, bg=BG2, height=48)
+        topbar = tk.Frame(self, bg=TITLEBAR_BG, height=52)
         topbar.pack(fill="x", side="top")
         topbar.pack_propagate(False)
-        tk.Label(topbar, text="⚡ CURL RUNNER", font=self.fn_title,
-                 bg=BG2, fg=ACCENT).pack(side="left", padx=16, pady=8)
+        tk.Label(topbar, text="  Curl Runner", font=self.fn_title,
+                 bg=TITLEBAR_BG, fg=TEXT).pack(side="left", padx=14, pady=10)
         tk.Label(topbar, text="v4  ·  Multi-tab · Pre-script · Beautify · Compare",
-                 font=self.fn_label, bg=BG2, fg=TEXT_DIM).pack(side="left")
+                 font=self.fn_label, bg=TITLEBAR_BG, fg=TEXT_DIM).pack(side="left", padx=(0,0))
 
-        ef = tk.Frame(topbar, bg=BG2)
+        ef = tk.Frame(topbar, bg=TITLEBAR_BG)
         ef.pack(side="right", padx=16)
-        tk.Label(ef, text="ENV:", font=self.fn_badge, bg=BG2, fg=TEXT_DIM).pack(side="left")
+        tk.Label(ef, text="ENV:", font=self.fn_badge, bg=TITLEBAR_BG, fg=TEXT_DIM).pack(side="left")
         self.env_var = tk.StringVar(value=self.active_env)
+        style = ttk.Style()
+        style.configure("TCombobox",
+                         fieldbackground=BG3, background=BG3,
+                         foreground=TEXT, selectbackground=SURFACE_ACTIVE,
+                         selectforeground="white", arrowcolor=ACCENT)
         self.env_combo = ttk.Combobox(ef, textvariable=self.env_var, width=16,
-                                      state="readonly", font=self.fn_label)
+                                      state="readonly", font=self.fn_label,
+                                      style="TCombobox")
         self.env_combo.pack(side="left", padx=4)
         self.env_combo.bind("<<ComboboxSelected>>", self._on_env_change)
-        self._mkbtn(ef, "⚙ Manage",  self._open_env_editor, side="left", pad=(4,0))
-        self._mkbtn(ef, "⇄ Compare", self._open_compare,    side="left", pad=(10,0))
+        self._mkbtn(ef, "⚙ Manage",  self._open_env_editor,  side="left", pad=(4,0))
+        self._mkbtn(ef, "⇄ Compare", self._open_compare,     side="left", pad=(10,0))
+        self._mkbtn(ef, "🔤 Font",   self._open_font_settings, side="left", pad=(10,0))
 
         # 3-column layout
         outer = tk.PanedWindow(self, orient="horizontal", bg=BG,
@@ -342,9 +152,9 @@ class CurlRunnerApp(tk.Tk):
         tab_row.pack(fill="x")
         for lbl, val in [("📋 History","history"),("🗂 Collections","collections")]:
             btn = tk.Button(tab_row, text=lbl, font=self.fn_small,
-                            bg=BG3 if val=="history" else SIDEBAR,
-                            fg=ACCENT if val=="history" else TEXT_DIM,
-                            relief="flat", cursor="hand2", pady=6, bd=0,
+                            bg=SURFACE_ACTIVE if val=="history" else SIDEBAR,
+                            fg="white" if val=="history" else TEXT_DIM,
+                            relief="flat", cursor="hand2", pady=8, bd=0,
                             command=lambda v=val: self._show_sidebar(v))
             btn.pack(side="left", fill="x", expand=True)
             if val == "history":
@@ -362,8 +172,8 @@ class CurlRunnerApp(tk.Tk):
         for v, fr in [("history",self.sidebar_history),
                       ("collections",self.sidebar_collections)]:
             getattr(self, f"stab_{v}").config(
-                bg=BG3 if v==val else SIDEBAR,
-                fg=ACCENT if v==val else TEXT_DIM)
+                bg=SURFACE_ACTIVE if v==val else SIDEBAR,
+                fg="white" if v==val else TEXT_DIM)
             if v == val: fr.pack(fill="both", expand=True)
             else:        fr.pack_forget()
 
@@ -461,13 +271,13 @@ class CurlRunnerApp(tk.Tk):
         if idx >= len(visible): return
         tid = visible[idx].get("id")
         self.history = [h for h in self.history if h.get("id") != tid]
-        _save(HIST_FILE, self.history)
+        store.save_history(self.history)
         self._refresh_history_list()
 
     def _clear_history(self):
         if messagebox.askyesno("Xác nhận","Xóa toàn bộ lịch sử?"):
             self.history = []
-            _save(HIST_FILE, self.history)
+            store.save_history(self.history)
             self._refresh_history_list()
 
     # ── Collections ──
@@ -486,10 +296,10 @@ class CurlRunnerApp(tk.Tk):
         style = ttk.Style()
         style.theme_use("default")
         style.configure("Treeview", background=BG2, foreground=TEXT,
-                        fieldbackground=BG2, font=("Segoe UI",9),
-                        rowheight=24, borderwidth=0)
-        style.map("Treeview", background=[("selected",ACCENT)],
-                  foreground=[("selected","#fff")])
+                        fieldbackground=BG2, font=(FONT_FAMILY, 9),
+                        rowheight=28, borderwidth=0)
+        style.map("Treeview", background=[("selected", SURFACE_ACTIVE)],
+                  foreground=[("selected", "white")])
         self.coll_tree.pack(fill="both", expand=True)
         self.coll_tree.bind("<Double-Button-1>", self._load_from_collection)
         self.coll_tree.bind("<Button-3>",        self._coll_ctx)
@@ -550,7 +360,7 @@ class CurlRunnerApp(tk.Tk):
         name = simpledialog.askstring("Tên Collection","Nhập tên mới:", parent=self)
         if name and name.strip():
             self.collections.setdefault(name.strip(),[])
-            _save(COLL_FILE, self.collections)
+            store.save_collections(self.collections)
             self._refresh_collection_tree()
 
     def _save_to_coll_dialog(self, curl_str):
@@ -582,7 +392,7 @@ class CurlRunnerApp(tk.Tk):
                 "id": str(uuid.uuid4())[:8], "name": name,
                 "method": method, "curl": curl_str
             })
-            _save(COLL_FILE, self.collections)
+            store.save_collections(self.collections)
             self._refresh_collection_tree()
             win.destroy()
         tk.Button(win, text="💾 Lưu", font=self.fn_btn, bg=ACCENT, fg="#fff",
@@ -595,19 +405,19 @@ class CurlRunnerApp(tk.Tk):
                                              initialvalue=it["name"], parent=self)
                 if new:
                     it["name"] = new.strip()
-                    _save(COLL_FILE, self.collections)
+                    store.save_collections(self.collections)
                     self._refresh_collection_tree()
                 return
 
     def _del_coll_item(self, col_name, item_id):
         self.collections[col_name] = [i for i in self.collections.get(col_name,[])
                                        if i["id"] != item_id]
-        _save(COLL_FILE, self.collections); self._refresh_collection_tree()
+        store.save_collections(self.collections); self._refresh_collection_tree()
 
     def _del_collection(self, col_name):
         if messagebox.askyesno("Xác nhận", f"Xóa '{col_name}'?"):
             self.collections.pop(col_name, None)
-            _save(COLL_FILE, self.collections); self._refresh_collection_tree()
+            store.save_collections(self.collections); self._refresh_collection_tree()
 
     # ══ ENVIRONMENT ═══════════════════════════
     def _refresh_env_selector(self):
@@ -703,7 +513,7 @@ class CurlRunnerApp(tk.Tk):
             for iid in tree.get_children():
                 k,v = tree.item(iid,"values")
                 if k.strip(): self.environments[env_name][k.strip()] = v
-            _save(ENV_FILE, self.environments)
+            store.save_environments(self.environments)
             self._refresh_env_selector()
             self.active_env = env_name
             self.env_var.set(env_name)
@@ -836,10 +646,10 @@ class CurlRunnerApp(tk.Tk):
         style = ttk.Style()
         style.configure("TNotebook", background=BG2, borderwidth=0)
         style.configure("TNotebook.Tab", background=BG3, foreground=TEXT_DIM,
-                        padding=[10,4], font=("Segoe UI",9))
+                        padding=[12,5], font=(FONT_FAMILY, 9))
         style.map("TNotebook.Tab",
-                  background=[("selected",BG2)],
-                  foreground=[("selected",ACCENT)])
+                  background=[("selected", SURFACE_ACTIVE)],
+                  foreground=[("selected", "white")])
 
         tab._nb = nb
 
@@ -898,8 +708,8 @@ class CurlRunnerApp(tk.Tk):
             lbl = tk.Label(frm,
                            text=f"  {tab.name[:14]}  ",
                            font=self.fn_tab,
-                           bg=BG if is_active else TAB_BG,
-                           fg=ACCENT if is_active else TEXT_DIM,
+                           bg=BG2 if is_active else TAB_BG,
+                           fg=TEXT if is_active else TEXT_DIM,
                            cursor="hand2")
             lbl.pack(side="left")
             lbl.bind("<Button-1>",        lambda e, idx=i: self._switch_tab(idx))
@@ -915,7 +725,7 @@ class CurlRunnerApp(tk.Tk):
 
             # Bottom border for active tab
             if is_active:
-                indicator = tk.Frame(frm, bg=ACCENT, height=2)
+                indicator = tk.Frame(frm, bg=ACCENT, height=3)
                 indicator.pack(fill="x", side="bottom")
 
     def _switch_tab(self, idx):
@@ -1123,7 +933,7 @@ class CurlRunnerApp(tk.Tk):
 
         tab._send_btn.config(state="disabled", text="⏳  Đang gửi...")
         tab._status_lbl.config(text="Đang gửi...", fg=TEXT_DIM)
-        self.status_badge.config(text="…", fg=TEXT_DIM)
+        self.status_badge.config(text="...", fg=TEXT_DIM, bg=BG3)
         self.time_label.config(text=""); self.size_label.config(text="")
 
         def worker():
@@ -1145,30 +955,67 @@ class CurlRunnerApp(tk.Tk):
         frame = tk.Frame(parent, bg=BG, padx=12, pady=10)
 
         ss = tk.Frame(frame, bg=BG)
-        ss.pack(fill="x", pady=(0,6))
+        ss.pack(fill="x", pady=(0,8))
         self._sec(ss, "RESPONSE", side="left")
-        self.status_badge = tk.Label(ss, text="—", font=self.fn_stat, bg=BG, fg=TEXT_DIM)
+        self.status_badge = tk.Label(ss, text="-", font=self.fn_stat, bg=BG3, fg=TEXT_DIM,
+                                     padx=10, pady=3)
         self.status_badge.pack(side="left", padx=(14,4))
-        self.time_label = tk.Label(ss, text="", font=self.fn_label, bg=BG, fg=TEXT_DIM)
+        self.time_label = tk.Label(ss, text="", font=self.fn_label, bg=BG3, fg=TEXT_DIM,
+                                   padx=8, pady=4)
         self.time_label.pack(side="left", padx=6)
-        self.size_label = tk.Label(ss, text="", font=self.fn_label, bg=BG, fg=TEXT_DIM)
+        self.size_label = tk.Label(ss, text="", font=self.fn_label, bg=BG3, fg=TEXT_DIM,
+                                   padx=8, pady=4)
         self.size_label.pack(side="left", padx=6)
-        self._mkbtn(ss, "📋 Copy", self._copy_response, side="right")
-        self._mkbtn(ss, "💾 Lưu", self._save_response,  side="right", pad=(0,6))
+        self._mkbtn(ss, "Copy", self._copy_response, side="right")
+        self._mkbtn(ss, "Save", self._save_response,  side="right", pad=(0,6))
+        self.ai_analyze_btn = self._mkbtn(ss, "AI Analyze", self._analyze_response, side="right", pad=(0,6))
 
-        tr = tk.Frame(frame, bg=BG)
-        tr.pack(fill="x")
-        for lbl, val in [("Body","body"),("Headers","headers"),("Request Info","info"),("Script Log","log")]:
+        toolbar = tk.Frame(frame, bg=BG)
+        toolbar.pack(fill="x", pady=(0,4))
+        tr = tk.Frame(toolbar, bg=BORDER)
+        tr.pack(side="left")
+        for lbl, val in [("Body","body"),("Headers","headers"),("Info","info"),("Log","log"),("AI","ai")]:
             btn = tk.Button(tr, text=lbl, font=self.fn_label,
-                            bg=BG3 if val=="body" else BG,
-                            fg=ACCENT if val=="body" else TEXT_DIM,
-                            relief="flat", cursor="hand2", padx=12, pady=5,
+                            bg=SURFACE_ACTIVE if val=="body" else BG3,
+                            fg="white" if val=="body" else TEXT_DIM,
+                            relief="flat", cursor="hand2", padx=14, pady=6,
                             command=lambda v=val: self._show_resp_tab(v), bd=0)
-            btn.pack(side="left", padx=(0,2))
+            btn.pack(side="left", padx=(1,0), pady=1)
             if val == "body":       self.rtab_body    = btn
             elif val == "headers":  self.rtab_headers = btn
             elif val == "info":     self.rtab_info    = btn
             elif val == "log":      self.rtab_log     = btn
+            elif val == "ai":       self.rtab_ai      = btn
+
+        search = tk.Frame(frame, bg=BG3)
+        search.pack(fill="x", pady=(0,6))
+        tk.Label(search, text="Search", font=self.fn_label, bg=BG3,
+                 fg=TEXT_DIM).pack(side="left", padx=(9,5))
+        self.resp_search_var = tk.StringVar()
+        self.resp_case_var = tk.BooleanVar(value=False)
+        self.resp_search_var.trace_add("write", self._schedule_response_search)
+        self.resp_search_entry = tk.Entry(
+            search, textvariable=self.resp_search_var, font=self.fn_monos,
+            bg=BG2, fg=TEXT, insertbackground=ACCENT, relief="flat",
+            bd=0, width=18
+        )
+        self.resp_search_entry.pack(side="left", fill="x", expand=True, ipady=4)
+        self.resp_search_entry.bind("<Return>", lambda e: self._goto_response_match(1))
+        self.resp_search_entry.bind("<Shift-Return>", lambda e: self._goto_response_match(-1))
+        self.resp_search_entry.bind("<Escape>", lambda e: self._clear_response_search())
+        self.resp_search_count_lbl = tk.Label(search, text="", font=self.fn_small,
+                                              bg=BG3, fg=TEXT_DIM, width=8)
+        self.resp_search_count_lbl.pack(side="left", padx=(6,2))
+        self._mkbtn(search, "Prev", lambda: self._goto_response_match(-1), side="left", pad=(0,2))
+        self._mkbtn(search, "Next", lambda: self._goto_response_match(1), side="left", pad=(0,2))
+        tk.Checkbutton(
+            search, text="Aa", variable=self.resp_case_var,
+            command=self._schedule_response_search,
+            font=self.fn_small, bg=BG3, fg=TEXT_DIM,
+            activebackground=BG3, activeforeground=TEXT,
+            selectcolor=BG2, bd=0, padx=4
+        ).pack(side="left", padx=(0,4))
+        self.bind_all("<Control-f>", self._focus_response_search, add="+")
 
         self.resp_content = tk.Frame(frame, bg=BG)
         self.resp_content.pack(fill="both", expand=True, pady=(4,0))
@@ -1176,6 +1023,7 @@ class CurlRunnerApp(tk.Tk):
         self._mk_text_tab("headers", self.fn_monos)
         self._mk_text_tab("info",    self.fn_monos)
         self._mk_text_tab("log",     self.fn_monos)
+        self._mk_text_tab("ai",      self.fn_monos)
 
         self.body_tw.tag_configure("key",   foreground=CYAN_C)
         self.body_tw.tag_configure("str",   foreground=GREEN)
@@ -1191,6 +1039,13 @@ class CurlRunnerApp(tk.Tk):
         self.log_tw.tag_configure("ok",  foreground=GREEN)
         self.log_tw.tag_configure("err", foreground=RED_C)
         self.log_tw.tag_configure("dim", foreground=TEXT_DIM)
+        self.ai_tw.tag_configure("plain", foreground=TEXT)
+        self.ai_tw.tag_configure("dim", foreground=TEXT_DIM)
+        self.ai_tw.tag_configure("err", foreground=RED_C)
+        for tw in (self.body_tw, self.headers_tw, self.info_tw, self.log_tw, self.ai_tw):
+            tw.tag_configure("search_match", background="#5b3a22", foreground=TEXT)
+            tw.tag_configure("search_current", background=ACCENT, foreground="#171717")
+            tw.tag_raise("search_current")
 
         self._show_resp_tab("body")
         return frame
@@ -1214,25 +1069,176 @@ class CurlRunnerApp(tk.Tk):
             self.info_frame = frame; self.info_tw = tw
         elif name == "log":
             self.log_frame = frame; self.log_tw = tw
+        elif name == "ai":
+            self.ai_frame = frame; self.ai_tw = tw
 
     def _show_resp_tab(self, val: str) -> None:
+        self.active_resp_tab = val
         _frames = {"body": self.body_frame, "headers": self.headers_frame,
-                   "info": self.info_frame, "log": self.log_frame}
+                   "info": self.info_frame, "log": self.log_frame,
+                   "ai": self.ai_frame}
         _btns   = {"body": self.rtab_body, "headers": self.rtab_headers,
-                   "info": self.rtab_info, "log": self.rtab_log}
+                   "info": self.rtab_info, "log": self.rtab_log,
+                   "ai": self.rtab_ai}
         for v, frame in _frames.items():
             if frame: frame.pack_forget()
             btn = _btns.get(v)
-            if btn: btn.config(bg=BG3 if v==val else BG, fg=ACCENT if v==val else TEXT_DIM)
+            if btn: btn.config(
+                bg=SURFACE_ACTIVE if v==val else BG3,
+                fg="white" if v==val else TEXT_DIM)
         target = _frames.get(val)
         if target: target.pack(fill="both", expand=True)
+        self._schedule_response_search()
+
+    def _response_text_widgets(self) -> list[tk.Text]:
+        return [w for w in (self.body_tw, self.headers_tw, self.info_tw, self.log_tw, self.ai_tw) if w]
+
+    def _active_response_widget(self) -> tk.Text:
+        return getattr(self, f"{self.active_resp_tab}_tw", self.body_tw)
+
+    def _focus_response_search(self, _event=None):
+        if self.resp_search_entry:
+            self.resp_search_entry.focus_set()
+            self.resp_search_entry.selection_range(0, "end")
+        return "break"
+
+    def _clear_response_search(self):
+        if self.resp_search_var:
+            self.resp_search_var.set("")
+        self.response_matches = []
+        self.response_match_index = -1
+        self.response_match_overflow = False
+        self._clear_response_search_tags()
+        self._update_response_search_count()
+        return "break"
+
+    def _schedule_response_search(self, *_):
+        if not getattr(self, "resp_search_count_lbl", None):
+            return
+        if self.response_search_after:
+            self.after_cancel(self.response_search_after)
+        self.response_search_after = self.after(120, self._run_response_search)
+
+    def _clear_response_search_tags(self, widget: tk.Text | None = None) -> None:
+        widgets = [widget] if widget else self._response_text_widgets()
+        for w in widgets:
+            old_state = str(w.cget("state"))
+            if old_state == "disabled":
+                w.config(state="normal")
+            w.tag_remove("search_match", "1.0", "end")
+            w.tag_remove("search_current", "1.0", "end")
+            if old_state == "disabled":
+                w.config(state="disabled")
+
+    def _run_response_search(self) -> None:
+        self.response_search_after = None
+        query = self.resp_search_var.get() if self.resp_search_var else ""
+        self.response_matches = []
+        self.response_match_index = -1
+        self.response_match_overflow = False
+        self._clear_response_search_tags()
+
+        if not query:
+            self._update_response_search_count()
+            return
+
+        w = self._active_response_widget()
+        text = w.get("1.0", "end-1c")
+        if not text:
+            self._update_response_search_count()
+            return
+
+        needle = query if self.resp_case_var.get() else query.lower()
+        haystack = text if self.resp_case_var.get() else text.lower()
+        start = 0
+        q_len = len(query)
+        matches: list[tuple[str, str]] = []
+        overflow = False
+
+        old_state = str(w.cget("state"))
+        if old_state == "disabled":
+            w.config(state="normal")
+
+        while True:
+            hit = haystack.find(needle, start)
+            if hit < 0:
+                break
+            start_index = f"1.0+{hit}c"
+            end_index = f"1.0+{hit + q_len}c"
+            matches.append((start_index, end_index))
+            w.tag_add("search_match", start_index, end_index)
+            start = hit + q_len
+            if len(matches) >= self.SEARCH_HIGHLIGHT_LIMIT:
+                overflow = haystack.find(needle, start) >= 0
+                break
+
+        w.tag_raise("search_match")
+        w.tag_raise("search_current")
+        if old_state == "disabled":
+            w.config(state="disabled")
+
+        self.response_matches = matches
+        self.response_match_overflow = overflow
+        if matches:
+            self.response_match_index = 0
+            self._mark_response_current()
+        else:
+            self._update_response_search_count()
+
+    def _goto_response_match(self, step: int):
+        if not (self.resp_search_var and self.resp_search_var.get()):
+            return self._focus_response_search()
+        if not self.response_matches:
+            self._run_response_search()
+        if not self.response_matches:
+            return "break"
+        if self.response_match_index < 0:
+            self.response_match_index = 0
+        else:
+            self.response_match_index = (self.response_match_index + step) % len(self.response_matches)
+        self._mark_response_current()
+        return "break"
+
+    def _mark_response_current(self) -> None:
+        if not self.response_matches:
+            self._update_response_search_count()
+            return
+        w = self._active_response_widget()
+        old_state = str(w.cget("state"))
+        if old_state == "disabled":
+            w.config(state="normal")
+        w.tag_remove("search_current", "1.0", "end")
+        start, end = self.response_matches[self.response_match_index]
+        w.tag_add("search_current", start, end)
+        w.tag_raise("search_current")
+        if old_state == "disabled":
+            w.config(state="disabled")
+        w.see(start)
+        self._update_response_search_count()
+
+    def _update_response_search_count(self) -> None:
+        if not getattr(self, "resp_search_count_lbl", None):
+            return
+        query = self.resp_search_var.get() if self.resp_search_var else ""
+        if not query:
+            self.resp_search_count_lbl.config(text="")
+        elif not self.response_matches:
+            self.resp_search_count_lbl.config(text="0/0")
+        else:
+            total = f"{len(self.response_matches)}+" if self.response_match_overflow else str(len(self.response_matches))
+            self.resp_search_count_lbl.config(text=f"{self.response_match_index + 1}/{total}")
 
     def _clear_response_panel(self):
-        self.status_badge.config(text="—", fg=TEXT_DIM)
+        self.status_badge.config(text="-", fg=TEXT_DIM, bg=BG3)
         self.time_label.config(text=""); self.size_label.config(text="")
-        for name in ("body","headers","info","log"):
+        for name in ("body","headers","info","log","ai"):
             w = getattr(self, f"{name}_tw")
             w.config(state="normal"); w.delete("1.0","end"); w.config(state="disabled")
+        self.response_matches = []
+        self.response_match_index = -1
+        self.response_match_overflow = False
+        self._clear_response_search_tags()
+        self._update_response_search_count()
 
     def _restore_response(self, tab):
         if tab.response is None: return
@@ -1240,14 +1246,16 @@ class CurlRunnerApp(tk.Tk):
         sc      = resp.status_code
         elapsed = tab.elapsed or 0
         size    = len(resp.content)
-        self.status_badge.config(text=f"{sc} {resp.reason}", fg=status_color(sc))
-        self.time_label.config(text=f"⏱ {elapsed:.0f} ms", fg=YELLOW_C)
+        self.status_badge.config(text=f"{sc} {resp.reason}", bg=status_color(sc), fg="#171717")
+        self.time_label.config(text=f"{elapsed:.0f} ms", fg=YELLOW_C)
         sz = f"{size:,} B" if size < 1024 else f"{size/1024:.1f} KB"
-        self.size_label.config(text=f"📦 {sz}", fg=TEXT_DIM)
+        self.size_label.config(text=sz, fg=TEXT_DIM)
         self._write_body(tab.body_text, resp.headers.get("Content-Type",""))
         self._write_headers(resp.headers)
         self._write_info(tab.parsed, resp, elapsed, tab.detected_enc)
         self._write_log(tab.pre_logs)
+        self._write_ai_analysis(tab.ai_analysis)
+        self._schedule_response_search()
 
     # ── Display response ──────────────────────
     def _display(self, tab, parsed, resp, elapsed, original_curl, pre_logs):
@@ -1255,34 +1263,17 @@ class CurlRunnerApp(tk.Tk):
         tab.parsed   = parsed
         tab.elapsed  = elapsed
         tab.pre_logs = pre_logs
+        tab.ai_analysis = ""
 
         sc   = resp.status_code
         size = len(resp.content)
-        self.status_badge.config(text=f"{sc} {resp.reason}", fg=status_color(sc))
-        self.time_label.config(text=f"⏱ {elapsed:.0f} ms", fg=YELLOW_C)
+        self.status_badge.config(text=f"{sc} {resp.reason}", bg=status_color(sc), fg="#171717")
+        self.time_label.config(text=f"{elapsed:.0f} ms", fg=YELLOW_C)
         sz = f"{size:,} B" if size < 1024 else f"{size/1024:.1f} KB"
-        self.size_label.config(text=f"📦 {sz}", fg=TEXT_DIM)
+        self.size_label.config(text=sz, fg=TEXT_DIM)
 
-        # Decode
-        ct_header     = resp.headers.get("Content-Type","")
-        charset_match = re.search(r'charset=([^\s;]+)', ct_header, re.I)
-        if not tab._var_decode.get():
-            body_text = resp.content.decode("latin-1")
-            enc_info  = "raw (no decode)"
-        elif charset_match:
-            charset = charset_match.group(1).strip()
-            enc_info = f"{charset}  (từ Content-Type header)"
-            try:    body_text = resp.content.decode(charset, errors="replace")
-            except: body_text = resp.content.decode("utf-8", errors="replace"); enc_info += " → fallback utf-8"
-        elif HAS_DETECT and resp.content:
-            result  = detect_encoding(resp.content)
-            charset = result.best().encoding if hasattr(result,"best") else "utf-8"
-            enc_info = f"{charset}  (auto-detected)"
-            try:    body_text = resp.content.decode(charset or "utf-8", errors="replace")
-            except: body_text = resp.content.decode("utf-8", errors="replace"); enc_info = "utf-8 (fallback)"
-        else:
-            body_text = resp.content.decode("utf-8", errors="replace")
-            enc_info  = "utf-8 (fallback)"
+        ct_header = resp.headers.get("Content-Type","")
+        body_text, enc_info = decode_response(resp, tab._var_decode.get())
 
         tab.body_text    = body_text
         tab.detected_enc = enc_info
@@ -1291,6 +1282,8 @@ class CurlRunnerApp(tk.Tk):
         self._write_headers(resp.headers)
         self._write_info(parsed, resp, elapsed, enc_info)
         self._write_log(pre_logs)
+        self._write_ai_analysis("")
+        self._schedule_response_search()
 
         tab._send_btn.config(state="normal", text="▶  SEND REQUEST")
         url_s = parsed['url'][:52] + ("..." if len(parsed['url'])>52 else "")
@@ -1309,23 +1302,38 @@ class CurlRunnerApp(tk.Tk):
             "elapsed": round(elapsed),
         })
         self.history = self.history[-500:]
-        _save(HIST_FILE, self.history)
+        store.save_history(self.history)
         self._refresh_history_list()
 
     # ── Write panels ──────────────────────────
     def _write_body(self, text, ct):
         w = self.body_tw
         w.config(state="normal"); w.delete("1.0","end")
-        if "application/json" in ct or text.strip().startswith(("{","[")):
+        render_text = text
+        if len(render_text) > self.RESPONSE_PREVIEW_LIMIT:
+            skipped = len(render_text) - self.RESPONSE_PREVIEW_LIMIT
+            render_text = (
+                render_text[:self.RESPONSE_PREVIEW_LIMIT]
+                + f"\n\n[Preview truncated. {skipped:,} more characters are available via Save.]"
+            )
+
+        looks_json = "application/json" in ct.lower() or render_text.lstrip().startswith(("{","["))
+        if looks_json and len(text) <= self.JSON_PRETTY_LIMIT:
             try:
                 pretty = json.dumps(json.loads(text), indent=2, ensure_ascii=False)
-                self._insert_json(w, pretty)
-            except: w.insert("end", text, "plain")
+                if len(pretty) <= self.JSON_HIGHLIGHT_LIMIT:
+                    self._insert_json(w, pretty)
+                else:
+                    w.insert("end", pretty, "plain")
+            except Exception:
+                w.insert("end", render_text, "plain")
         else:
-            w.insert("end", text, "plain")
+            w.insert("end", render_text, "plain")
         w.config(state="disabled")
 
     def _insert_json(self, w, text):
+        base = w.index("end-1c")
+        w.insert("end", text, "plain")
         TOKEN_RE = re.compile(
             r'("(?:[^"\\]|\\.)*")'
             r'|(-?\d+(?:\.\d+)?(?:[eE][+\-]?\d+)?)'
@@ -1333,22 +1341,22 @@ class CurlRunnerApp(tk.Tk):
             r'|([{}\[\]:,])'
             r'|(\s+)'
         )
-        pos = 0; expect_key = True
+        expect_key = True
         for m in TOKEN_RE.finditer(text):
-            if m.start() > pos: w.insert("end", text[pos:m.start()], "plain")
-            pos = m.end()
             s,n,kw,p,sp = m.groups()
-            if sp: w.insert("end", sp, "plain")
-            elif p:
-                w.insert("end", p, "plain")
+            if sp:
+                continue
+            if p:
                 if p in ('{',','): expect_key = True
                 elif p == ':':     expect_key = False
             elif s:
-                w.insert("end", s, "key" if expect_key else "str")
+                w.tag_add("key" if expect_key else "str",
+                          f"{base}+{m.start()}c", f"{base}+{m.end()}c")
                 if expect_key: expect_key = False
-            elif n:  w.insert("end", n,  "num")
-            elif kw: w.insert("end", kw, "bool")
-        if pos < len(text): w.insert("end", text[pos:], "plain")
+            elif n:
+                w.tag_add("num", f"{base}+{m.start()}c", f"{base}+{m.end()}c")
+            elif kw:
+                w.tag_add("bool", f"{base}+{m.start()}c", f"{base}+{m.end()}c")
 
     def _write_headers(self, headers):
         w = self.headers_tw
@@ -1391,11 +1399,110 @@ class CurlRunnerApp(tk.Tk):
                 w.insert("end", f"  {line}\n", tag)
         w.config(state="disabled")
 
+    def _write_ai_analysis(self, text: str, tag: str = "plain"):
+        w = self.ai_tw
+        w.config(state="normal"); w.delete("1.0","end")
+        if text:
+            w.insert("end", text, tag)
+        else:
+            w.insert("end", "  No AI analysis yet.", "dim")
+        w.config(state="disabled")
+        self._schedule_response_search()
+
+    def _get_openai_key(self) -> str:
+        key = os.environ.get("OPENAI_API_KEY") or self.openai_api_key
+        if key:
+            return key
+        key = simpledialog.askstring(
+            "OpenAI API key",
+            "OPENAI_API_KEY:",
+            parent=self,
+            show="*",
+        )
+        if key:
+            self.openai_api_key = key.strip()
+        return self.openai_api_key
+
+    def _resolve_ai_provider(self) -> tuple[str, str, str]:
+        provider = os.environ.get("AI_PROVIDER", "ollama").strip().lower()
+        if provider not in ("ollama", "openai"):
+            provider = "ollama"
+
+        if provider == "openai":
+            api_key = self._get_openai_key()
+            if not api_key:
+                raise RuntimeError("OPENAI_API_KEY is required when AI_PROVIDER=openai.")
+            return "openai", os.environ.get("OPENAI_MODEL", "gpt-5.4-mini"), api_key
+
+        return (
+            "ollama",
+            os.environ.get("OLLAMA_MODEL", ""),
+            os.environ.get("OLLAMA_BASE_URL", OLLAMA_DEFAULT_BASE_URL),
+        )
+
+    def _analyze_response(self):
+        if self.active_tab_idx < 0:
+            return
+        tab = self.tabs[self.active_tab_idx]
+        if tab.response is None:
+            messagebox.showinfo("", "Hãy gửi request trước."); return
+
+        try:
+            provider, model, credential = self._resolve_ai_provider()
+        except Exception as e:
+            self._show_resp_tab("ai")
+            self._write_ai_analysis(f"AI analysis failed:\n{e}", "err")
+            return
+
+        context = build_ai_response_context(
+            tab.parsed or {}, tab.response, tab.body_text, tab.detected_enc
+        )
+        self._show_resp_tab("ai")
+        provider_label = "Ollama local" if provider == "ollama" else "OpenAI"
+        model_label = model or "auto model"
+        self._write_ai_analysis(f"  {provider_label} is analyzing the response ({model_label})...", "dim")
+        self.ai_analyze_btn.config(state="disabled", text="Analyzing...")
+        tab._status_lbl.config(text=f"AI đang phân tích response bằng {provider_label}...", fg=TEXT_DIM)
+
+        def worker():
+            try:
+                if provider == "ollama":
+                    result, model_used = analyze_response_with_ollama(context, model, credential)
+                    result = f"[Ollama local: {model_used}]\n\n{result}"
+                else:
+                    result = analyze_response_with_ai(credential, context, model)
+                    result = f"[OpenAI: {model}]\n\n{result}"
+                self.after(0, lambda result=result: self._finish_ai_analysis(tab, result, None))
+            except Exception as e:
+                error_msg = str(e) or repr(e) or e.__class__.__name__
+                self.after(0, lambda error_msg=error_msg: self._finish_ai_analysis(tab, "", error_msg))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_ai_analysis(self, tab, result: str, error: str | None):
+        self.ai_analyze_btn.config(state="normal", text="AI Analyze")
+        if error:
+            if error == "None":
+                error = "Unknown OpenAI API error. Please try again; the next run will include HTTP details."
+            tab.ai_analysis = f"AI analysis failed:\n{error}"
+            tab._status_lbl.config(text=f"AI analysis failed: {error[:70]}", fg=RED_C)
+            if self.active_tab_idx >= 0 and self.tabs[self.active_tab_idx] is tab:
+                self._show_resp_tab("ai")
+                self._write_ai_analysis(tab.ai_analysis, "err")
+            return
+
+        tab.ai_analysis = result
+        tab._status_lbl.config(text="AI analysis complete", fg=GREEN)
+        if self.active_tab_idx >= 0 and self.tabs[self.active_tab_idx] is tab:
+            self._show_resp_tab("ai")
+            self._write_ai_analysis(result)
+
     def _show_error(self, tab, msg):
         tab._send_btn.config(state="normal", text="▶  SEND REQUEST")
-        self.status_badge.config(text="ERROR", fg=RED_C)
+        self.status_badge.config(text="ERROR", bg=RED_C, fg="#171717")
         tab._status_lbl.config(text=f"❌ {msg[:80]}", fg=RED_C)
         self._write_body(f"[LỖI]\n{msg}", "text/plain")
+        self._schedule_response_search()
 
     def _copy_response(self):
         try:
@@ -1446,405 +1553,382 @@ class CurlRunnerApp(tk.Tk):
             open_curls.append("")
         CurlCompareWindow(self, initial_curls=open_curls)
 
+    def _open_font_settings(self) -> None:
+        """Mở dialog chọn font hệ thống, apply realtime cho toàn bộ UI."""
+        win = tk.Toplevel(self)
+        win.title("🔤 Font Settings")
+        win.configure(bg=BG)
+        win.geometry("540x720")
+        win.minsize(480, 620)
+        win.grab_set()
+
+        # ── Header (top, fixed)
+        hdr = tk.Frame(win, bg=TITLEBAR_BG, height=52)
+        hdr.pack(fill="x", side="top")
+        hdr.pack_propagate(False)
+        tk.Label(hdr, text="🔤  Font Settings",
+                 font=tkfont.Font(family=FONT_FAMILY, size=13, weight="bold"),
+                 bg=TITLEBAR_BG, fg=TEXT).pack(side="left", padx=16, pady=12)
+
+        # ── Button row (bottom, fixed) — must pack BEFORE body
+        btn_row = tk.Frame(win, bg=BG2, padx=20, pady=12)
+        btn_row.pack(fill="x", side="bottom")
+
+        # ── Separator above buttons
+        tk.Frame(win, bg=BORDER, height=1).pack(fill="x", side="bottom")
+
+        # ── Scrollable body (middle, expands)
+        canvas = tk.Canvas(win, bg=BG, highlightthickness=0, bd=0)
+        scrollbar = tk.Scrollbar(win, orient="vertical", command=canvas.yview,
+                                 bg=BG3, troughcolor=BG2, bd=0)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        body = tk.Frame(canvas, bg=BG, padx=20, pady=14)
+        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _on_body_configure(e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        def _on_canvas_configure(e):
+            canvas.itemconfig(body_window, width=e.width)
+        body.bind("<Configure>", _on_body_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        # Mouse wheel scroll
+        def _on_mousewheel(e):
+            canvas.yview_scroll(int(-1*(e.delta/120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        win.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
+        # ── Get all system fonts
+        all_fonts = sorted(set(tkfont.families()))
+        # Separate mono fonts (heuristic: name contains common mono keywords)
+        mono_keywords = {"mono","code","console","courier","terminal",
+                         "cascadia","consolas","jetbrains","fira","hack",
+                         "source code","inconsolata","menlo","monaco","roboto mono"}
+        mono_fonts  = [f for f in all_fonts
+                       if any(k in f.lower() for k in mono_keywords)]
+        ui_fonts    = all_fonts  # show all for UI font
+
+        # ── Section: UI font
+        def section(text):
+            f = tk.Frame(body, bg=BG)
+            f.pack(fill="x", pady=(10,4))
+            tk.Label(f, text=text, font=tkfont.Font(family=FONT_FAMILY, size=8, weight="bold"),
+                     bg=BG, fg=TEXT_DIM).pack(anchor="w")
+            tk.Frame(body, bg=BORDER, height=1).pack(fill="x", pady=(0,6))
+
+        section("UI FONT  (labels, buttons, menus)")
+
+        ui_var = tk.StringVar(value=self.fn_label.actual("family"))
+        ui_size_var = tk.IntVar(value=self.fn_label.actual("size"))
+
+        ui_row = tk.Frame(body, bg=BG)
+        ui_row.pack(fill="x", pady=(0,4))
+
+        # Font list with search
+        ui_search_var = tk.StringVar()
+        ui_search = tk.Entry(ui_row, textvariable=ui_search_var,
+                             font=tkfont.Font(family=FONT_FAMILY, size=9),
+                             bg=BG3, fg=TEXT, insertbackground=ACCENT,
+                             relief="flat", bd=0)
+        ui_search.pack(fill="x", ipady=5, padx=1, pady=(0,4))
+        ui_search.insert(0, "🔍 Tìm font...")
+
+        ui_list_frame = tk.Frame(ui_row, bg=BORDER)
+        ui_list_frame.pack(fill="x")
+        ui_sb = tk.Scrollbar(ui_list_frame, bg=BG3, troughcolor=BG2, bd=0)
+        ui_sb.pack(side="right", fill="y")
+        ui_listbox = tk.Listbox(ui_list_frame, bg=BG2, fg=TEXT,
+                                font=tkfont.Font(family=FONT_FAMILY, size=9),
+                                selectbackground=SURFACE_ACTIVE, selectforeground="white",
+                                relief="flat", bd=0, height=8, activestyle="none",
+                                yscrollcommand=ui_sb.set)
+        ui_listbox.pack(fill="x", padx=1, pady=1)
+        ui_sb.config(command=ui_listbox.yview)
+
+        def populate_ui_list(q=""):
+            ui_listbox.delete(0, "end")
+            q_low = q.lower()
+            for f in ui_fonts:
+                if not q_low or q_low in f.lower():
+                    ui_listbox.insert("end", f"  {f}")
+            # Select current
+            for i in range(ui_listbox.size()):
+                if ui_var.get() in ui_listbox.get(i):
+                    ui_listbox.selection_set(i)
+                    ui_listbox.see(i)
+                    break
+
+        def on_ui_search_focus(focused):
+            if focused and ui_search_var.get() == "🔍 Tìm font...":
+                ui_search.delete(0, "end")
+                ui_search.config(fg=TEXT)
+            elif not focused and not ui_search_var.get():
+                ui_search.insert(0, "🔍 Tìm font...")
+                ui_search.config(fg=TEXT_DIM)
+
+        ui_search.bind("<FocusIn>",    lambda e: on_ui_search_focus(True))
+        ui_search.bind("<FocusOut>",   lambda e: on_ui_search_focus(False))
+        ui_search.bind("<KeyRelease>", lambda e: populate_ui_list(
+            "" if ui_search_var.get() == "🔍 Tìm font..." else ui_search_var.get()))
+
+        def on_ui_select(e=None):
+            sel = ui_listbox.curselection()
+            if sel:
+                ui_var.set(ui_listbox.get(sel[0]).strip())
+                _update_preview()
+
+        ui_listbox.bind("<<ListboxSelect>>", on_ui_select)
+        populate_ui_list()
+
+        # Size slider for UI font
+        sz_row = tk.Frame(body, bg=BG)
+        sz_row.pack(fill="x", pady=(6,0))
+        tk.Label(sz_row, text="Cỡ chữ UI:", font=tkfont.Font(family=FONT_FAMILY, size=9),
+                 bg=BG, fg=TEXT_DIM).pack(side="left")
+        ui_size_lbl = tk.Label(sz_row, text=str(ui_size_var.get()),
+                                font=tkfont.Font(family=FONT_FAMILY, size=9, weight="bold"),
+                                bg=BG, fg=ACCENT, width=3)
+        ui_size_lbl.pack(side="right")
+        ui_size_slider = tk.Scale(sz_row, from_=7, to=14, orient="horizontal",
+                                   variable=ui_size_var, bg=BG, fg=TEXT,
+                                   troughcolor=BG3, highlightthickness=0,
+                                   activebackground=ACCENT, bd=0, showvalue=False,
+                                   command=lambda v: (ui_size_lbl.config(text=v), _update_preview()))
+        ui_size_slider.pack(side="left", fill="x", expand=True, padx=(8,8))
+
+        # ── Section: Mono font
+        section("MONO FONT  (curl input, response body, code)")
+
+        mono_var = tk.StringVar(value=self.fn_mono.actual("family"))
+        mono_size_var = tk.IntVar(value=self.fn_mono.actual("size"))
+
+        mono_row = tk.Frame(body, bg=BG)
+        mono_row.pack(fill="x", pady=(0,4))
+
+        mono_search_var = tk.StringVar()
+        mono_search = tk.Entry(mono_row, textvariable=mono_search_var,
+                               font=tkfont.Font(family=FONT_FAMILY, size=9),
+                               bg=BG3, fg=TEXT, insertbackground=ACCENT,
+                               relief="flat", bd=0)
+        mono_search.pack(fill="x", ipady=5, padx=1, pady=(0,4))
+        mono_search.insert(0, "🔍 Tìm mono font...")
+
+        mono_list_frame = tk.Frame(mono_row, bg=BORDER)
+        mono_list_frame.pack(fill="x")
+        mono_sb = tk.Scrollbar(mono_list_frame, bg=BG3, troughcolor=BG2, bd=0)
+        mono_sb.pack(side="right", fill="y")
+        mono_listbox = tk.Listbox(mono_list_frame, bg=BG2, fg=TEXT,
+                                  font=tkfont.Font(family=FONT_FAMILY, size=9),
+                                  selectbackground=SURFACE_ACTIVE, selectforeground="white",
+                                  relief="flat", bd=0, height=6, activestyle="none",
+                                  yscrollcommand=mono_sb.set)
+        mono_listbox.pack(fill="x", padx=1, pady=1)
+        mono_sb.config(command=mono_listbox.yview)
+
+        def populate_mono_list(q=""):
+            mono_listbox.delete(0, "end")
+            q_low = q.lower()
+            # Show mono fonts first, then all if no match
+            pool = mono_fonts if mono_fonts else all_fonts
+            full_pool = all_fonts
+            shown = [f for f in pool if not q_low or q_low in f.lower()]
+            if not shown:
+                shown = [f for f in full_pool if not q_low or q_low in f.lower()]
+            for f in shown:
+                mono_listbox.insert("end", f"  {f}")
+            for i in range(mono_listbox.size()):
+                if mono_var.get() in mono_listbox.get(i):
+                    mono_listbox.selection_set(i)
+                    mono_listbox.see(i)
+                    break
+
+        def on_mono_search_focus(focused):
+            if focused and mono_search_var.get() == "🔍 Tìm mono font...":
+                mono_search.delete(0, "end")
+                mono_search.config(fg=TEXT)
+            elif not focused and not mono_search_var.get():
+                mono_search.insert(0, "🔍 Tìm mono font...")
+                mono_search.config(fg=TEXT_DIM)
+
+        mono_search.bind("<FocusIn>",    lambda e: on_mono_search_focus(True))
+        mono_search.bind("<FocusOut>",   lambda e: on_mono_search_focus(False))
+        mono_search.bind("<KeyRelease>", lambda e: populate_mono_list(
+            "" if mono_search_var.get() == "🔍 Tìm mono font..." else mono_search_var.get()))
+
+        def on_mono_select(e=None):
+            sel = mono_listbox.curselection()
+            if sel:
+                mono_var.set(mono_listbox.get(sel[0]).strip())
+                _update_preview()
+
+        mono_listbox.bind("<<ListboxSelect>>", on_mono_select)
+        populate_mono_list()
+
+        mono_sz_row = tk.Frame(body, bg=BG)
+        mono_sz_row.pack(fill="x", pady=(6,0))
+        tk.Label(mono_sz_row, text="Cỡ chữ Mono:", font=tkfont.Font(family=FONT_FAMILY, size=9),
+                 bg=BG, fg=TEXT_DIM).pack(side="left")
+        mono_size_lbl = tk.Label(mono_sz_row, text=str(mono_size_var.get()),
+                                  font=tkfont.Font(family=FONT_FAMILY, size=9, weight="bold"),
+                                  bg=BG, fg=ACCENT, width=3)
+        mono_size_lbl.pack(side="right")
+        mono_size_slider = tk.Scale(mono_sz_row, from_=8, to=16, orient="horizontal",
+                                     variable=mono_size_var, bg=BG, fg=TEXT,
+                                     troughcolor=BG3, highlightthickness=0,
+                                     activebackground=ACCENT, bd=0, showvalue=False,
+                                     command=lambda v: (mono_size_lbl.config(text=v), _update_preview()))
+        mono_size_slider.pack(side="left", fill="x", expand=True, padx=(8,8))
+
+        # ── Preview
+        section("PREVIEW")
+        prev_frame = tk.Frame(body, bg=BG2, padx=12, pady=10)
+        prev_frame.pack(fill="x")
+        prev_ui = tk.Label(prev_frame,
+                           text="The quick brown fox — Curl Runner UI Text",
+                           bg=BG2, fg=TEXT, anchor="w")
+        prev_ui.pack(fill="x", pady=(0,4))
+        prev_mono = tk.Label(prev_frame,
+                             text="curl -X POST https://api.example.com/login",
+                             bg=BG2, fg=CYAN_C, anchor="w")
+        prev_mono.pack(fill="x")
+
+        def _update_preview():
+            try:
+                prev_ui.config(font=tkfont.Font(
+                    family=ui_var.get(), size=ui_size_var.get()))
+                prev_mono.config(font=tkfont.Font(
+                    family=mono_var.get(), size=mono_size_var.get()))
+            except Exception:
+                pass
+
+        _update_preview()
+
+        # ── Wire up buttons (btn_row was created before body above)
+        def _apply():
+            """Apply font changes to all existing Font objects — realtime."""
+            try:
+                # Update UI fonts
+                for fn_obj, size, weight in [
+                    (self.fn_title, 14,  "bold"),
+                    (self.fn_label, ui_size_var.get(), "normal"),
+                    (self.fn_btn,   ui_size_var.get(), "bold"),
+                    (self.fn_stat,  12,  "bold"),
+                    (self.fn_badge, max(7, ui_size_var.get()-1), "bold"),
+                    (self.fn_small, max(7, ui_size_var.get()-1), "normal"),
+                    (self.fn_tab,   ui_size_var.get(), "normal"),
+                ]:
+                    fn_obj.configure(family=ui_var.get(), size=size, weight=weight)
+
+                # Update mono fonts
+                for fn_obj, size in [
+                    (self.fn_mono,  mono_size_var.get()),
+                    (self.fn_monos, max(8, mono_size_var.get()-1)),
+                ]:
+                    fn_obj.configure(family=mono_var.get(), size=size)
+
+                # Persist to store
+                store.save(store.DATA_DIR / "font_settings.json", {
+                    "ui_family":    ui_var.get(),
+                    "ui_size":      ui_size_var.get(),
+                    "mono_family":  mono_var.get(),
+                    "mono_size":    mono_size_var.get(),
+                })
+
+                self._show_font_applied_toast(ui_var.get(), mono_var.get())
+            except Exception as e:
+                messagebox.showerror("Lỗi", f"Không apply được font:\n{e}", parent=win)
+
+        def _reset():
+            ui_var.set(FONT_FAMILY)
+            mono_var.set(FONT_FAMILY_MONO)
+            ui_size_var.set(9)
+            mono_size_var.set(10)
+            ui_size_lbl.config(text="9")
+            mono_size_lbl.config(text="10")
+            populate_ui_list(); populate_mono_list()
+            _update_preview()
+
+        tk.Button(btn_row, text="↺ Reset về mặc định",
+                  font=tkfont.Font(family=FONT_FAMILY, size=9),
+                  bg=BG3, fg=TEXT_DIM, activebackground=BORDER,
+                  relief="flat", cursor="hand2", padx=12, pady=6,
+                  command=_reset, bd=0).pack(side="left")
+
+        tk.Button(btn_row, text="✓  Apply",
+                  font=tkfont.Font(family=FONT_FAMILY, size=9, weight="bold"),
+                  bg=ACCENT, fg="white", activebackground=ACCENT2,
+                  relief="flat", cursor="hand2", padx=20, pady=6,
+                  command=_apply, bd=0).pack(side="right")
+
+        tk.Button(btn_row, text="Apply & Đóng",
+                  font=tkfont.Font(family=FONT_FAMILY, size=9),
+                  bg=SURFACE_ACTIVE, fg="white", activebackground=ACCENT,
+                  relief="flat", cursor="hand2", padx=14, pady=6,
+                  command=lambda: (_apply(), win.destroy()), bd=0).pack(side="right", padx=(0,8))
+
+    def _show_font_applied_toast(self, ui_font: str, mono_font: str) -> None:
+        """Hiện toast notification nhỏ khi apply font thành công."""
+        toast = tk.Toplevel(self)
+        toast.overrideredirect(True)
+        toast.configure(bg=SURFACE_ACTIVE)
+        toast.attributes("-topmost", True)
+        toast.attributes("-alpha", 0.95)
+
+        tk.Label(toast,
+                 text=f"✓  Font applied  —  UI: {ui_font[:20]}  ·  Mono: {mono_font[:20]}",
+                 font=tkfont.Font(family=FONT_FAMILY, size=9),
+                 bg=SURFACE_ACTIVE, fg="white", padx=16, pady=8).pack()
+
+        # Position bottom-right of main window
+        self.update_idletasks()
+        wx = self.winfo_x() + self.winfo_width()  - 460
+        wy = self.winfo_y() + self.winfo_height() - 60
+        toast.geometry(f"+{wx}+{wy}")
+
+        # Auto-dismiss after 2.5s with fade
+        def _fade(alpha=0.95):
+            if alpha > 0:
+                toast.attributes("-alpha", alpha)
+                toast.after(60, lambda: _fade(round(alpha - 0.08, 2)))
+            else:
+                toast.destroy()
+        toast.after(2000, _fade)
+
+    def _load_font_settings(self) -> None:
+        """Load font settings đã lưu khi khởi động app."""
+        try:
+            settings = store.load(store.DATA_DIR / "font_settings.json", {})
+            if not settings:
+                return
+            ui_fam   = settings.get("ui_family",   FONT_FAMILY)
+            ui_sz    = settings.get("ui_size",      9)
+            mono_fam = settings.get("mono_family",  FONT_FAMILY_MONO)
+            mono_sz  = settings.get("mono_size",    10)
+
+            for fn_obj, size, weight in [
+                (self.fn_title, 14,  "bold"),
+                (self.fn_label, ui_sz, "normal"),
+                (self.fn_btn,   ui_sz, "bold"),
+                (self.fn_stat,  12,   "bold"),
+                (self.fn_badge, max(7, ui_sz-1), "bold"),
+                (self.fn_small, max(7, ui_sz-1), "normal"),
+                (self.fn_tab,   ui_sz, "normal"),
+            ]:
+                fn_obj.configure(family=ui_fam, size=size, weight=weight)
+
+            for fn_obj, size in [
+                (self.fn_mono,  mono_sz),
+                (self.fn_monos, max(8, mono_sz-1)),
+            ]:
+                fn_obj.configure(family=mono_fam, size=size)
+        except Exception:
+            pass  # Fail silently — use default fonts
+
     def _chk(self, parent, text, var):
         tk.Checkbutton(parent, text=text, variable=var,
                        font=self.fn_label, bg=BG, fg=TEXT_DIM,
                        activebackground=BG, selectcolor=BG3,
                        relief="flat", bd=0).pack(side="left", padx=(0,8))
-
-
-# ══════════════════════════════════════════════
-# CURL COMPARE WINDOW
-# ══════════════════════════════════════════════
-class CurlCompareWindow(tk.Toplevel):
-    """
-    Popup so sánh n curl command side-by-side.
-    - Mỗi panel curl có thể kéo thả để mở rộng / thu nhỏ (PanedWindow dọc)
-    - Highlight khác biệt theo từng dòng (line-level diff)
-    - Thêm / xóa panel động
-    - Parse curl thành cấu trúc để so sánh semantic (method, url, headers, body)
-    """
-
-    # Highlight colors
-    HL_ADDED   = "#1e3a1e"   # xanh lá — dòng chỉ có ở panel này
-    HL_CHANGED = "#3a2e10"   # vàng     — dòng khác so với panel khác
-    HL_SAME    = BG2          # bình thường
-    HL_MISSING = "#2a1a1a"   # đỏ nhạt  — dòng trống (padding align)
-    FG_ADDED   = "#6fcf6f"
-    FG_CHANGED = "#f0c060"
-    FG_MISSING = "#555b70"
-
-    def __init__(self, parent: "CurlRunnerApp", initial_curls=None):
-        super().__init__(parent)
-        self.parent_app = parent
-        self.title("⇄ So Sánh Curl")
-        self.geometry("1300x780")
-        self.minsize(800, 500)
-        self.configure(bg=BG)
-
-        self._setup_fonts()
-        self._panels: list[dict] = []   # {frame, text_w, curl_var, label_var}
-        self._build_ui()
-
-        # Seed with initial curls (from open tabs or empty)
-        seeds = initial_curls or ["", ""]
-        for c in seeds:
-            self._add_panel(c)
-
-        self._run_compare()
-
-    def _setup_fonts(self):
-        self.fn_mono  = tkfont.Font(family="Consolas", size=10)
-        self.fn_monos = tkfont.Font(family="Consolas", size=9)
-        self.fn_label = tkfont.Font(family="Segoe UI", size=9)
-        self.fn_btn   = tkfont.Font(family="Segoe UI", size=9, weight="bold")
-        self.fn_badge = tkfont.Font(family="Segoe UI", size=8, weight="bold")
-        self.fn_small = tkfont.Font(family="Segoe UI", size=8)
-
-    def _build_ui(self):
-        # ── Toolbar
-        tb = tk.Frame(self, bg=BG2, height=44)
-        tb.pack(fill="x", side="top")
-        tb.pack_propagate(False)
-
-        tk.Label(tb, text="⇄  SO SÁNH CURL", font=tkfont.Font(family="Segoe UI",size=12,weight="bold"),
-                 bg=BG2, fg=ACCENT).pack(side="left", padx=14, pady=8)
-
-        self._mkbtn(tb, "＋ Thêm panel",  self._add_panel,    side="left", pad=(4,0))
-        self._mkbtn(tb, "⇄ So sánh",      self._run_compare,  side="left", pad=(6,0))
-        self._mkbtn(tb, "📋 Từ tab mở",   self._load_from_tabs, side="left", pad=(6,0))
-
-        tk.Label(tb, text="Double-click tên để đổi  ·  Kéo thanh phân cách để resize",
-                 font=tkfont.Font(family="Segoe UI",size=8),
-                 bg=BG2, fg=TEXT_DIM).pack(side="right", padx=14)
-
-        # ── Legend
-        leg = tk.Frame(self, bg=BG)
-        leg.pack(fill="x", padx=12, pady=(4,2))
-        for color, fg, label in [
-            (self.HL_ADDED,   self.FG_ADDED,   "● Chỉ có ở panel này"),
-            (self.HL_CHANGED, self.FG_CHANGED, "● Khác biệt"),
-            (self.HL_MISSING, self.FG_MISSING, "● Dòng trống (align)"),
-            (self.HL_SAME,    TEXT,             "  Giống nhau"),
-        ]:
-            dot = tk.Label(leg, text=label, font=self.fn_small, bg=color, fg=fg, padx=6, pady=1)
-            dot.pack(side="left", padx=(0,6))
-
-        # ── Split results label
-        self.result_lbl = tk.Label(self, text="", font=self.fn_small,
-                                   bg=BG, fg=TEXT_DIM, anchor="w")
-        self.result_lbl.pack(fill="x", padx=14, pady=(0,2))
-
-        # ── PanedWindow (horizontal) — chứa các panel curl
-        self.paned = tk.PanedWindow(self, orient="horizontal", bg=BORDER,
-                                    sashwidth=6, sashrelief="flat",
-                                    sashpad=2, bd=0)
-        self.paned.pack(fill="both", expand=True, padx=4, pady=(0,6))
-
-    # ── Panel management ──────────────────────
-    def _add_panel(self, curl_text=""):
-        idx   = len(self._panels)
-        name  = f"Curl {idx+1}"
-
-        outer = tk.Frame(self.paned, bg=BG, padx=0, pady=0)
-
-        # Header row
-        hdr = tk.Frame(outer, bg=BG3, height=30)
-        hdr.pack(fill="x"); hdr.pack_propagate(False)
-
-        label_var = tk.StringVar(value=name)
-        lbl = tk.Label(hdr, textvariable=label_var, font=self.fn_label,
-                       bg=BG3, fg=ACCENT, cursor="hand2")
-        lbl.pack(side="left", padx=8)
-        lbl.bind("<Double-Button-1>",
-                 lambda e, lv=label_var: self._rename_panel(lv))
-
-        # Diff summary badge (updated after compare)
-        diff_badge = tk.Label(hdr, text="", font=self.fn_small,
-                              bg=BG3, fg=TEXT_DIM)
-        diff_badge.pack(side="left", padx=4)
-
-        # Remove button (keep min 2)
-        rm_btn = tk.Button(hdr, text="✕", font=self.fn_small,
-                           bg=BG3, fg=TEXT_DIM, activebackground=RED_C,
-                           relief="flat", cursor="hand2", bd=0, padx=6,
-                           command=lambda o=outer: self._remove_panel(o))
-        rm_btn.pack(side="right", padx=4)
-
-        # Vertical paned: input (top) + diff view (bottom)
-        vpane = tk.PanedWindow(outer, orient="vertical", bg=BORDER,
-                               sashwidth=5, sashrelief="flat", bd=0)
-        vpane.pack(fill="both", expand=True)
-
-        # ── Input area
-        inp_frame = tk.Frame(vpane, bg=BG2)
-        inp_lbl = tk.Label(inp_frame, text="INPUT", font=self.fn_badge,
-                           bg=BG2, fg=TEXT_DIM, anchor="w")
-        inp_lbl.pack(fill="x", padx=6, pady=(4,0))
-
-        inp_wrap = tk.Frame(inp_frame, bg=BORDER)
-        inp_wrap.pack(fill="both", expand=True, padx=2, pady=(2,2))
-        inp_tw = tk.Text(inp_wrap, bg=BG2, fg=TEXT, font=self.fn_mono,
-                         wrap="none", relief="flat", padx=8, pady=6,
-                         insertbackground=ACCENT,
-                         selectbackground=ACCENT, selectforeground="#fff",
-                         undo=True, bd=0)
-        sb_x = tk.Scrollbar(inp_wrap, orient="horizontal",
-                             command=inp_tw.xview, bg=BG3, troughcolor=BG2, bd=0)
-        sb_y = tk.Scrollbar(inp_wrap, command=inp_tw.yview,
-                             bg=BG3, troughcolor=BG2, bd=0)
-        inp_tw.configure(xscrollcommand=sb_x.set, yscrollcommand=sb_y.set)
-        sb_y.pack(side="right", fill="y")
-        sb_x.pack(side="bottom", fill="x")
-        inp_tw.pack(fill="both", expand=True, padx=1, pady=1)
-        if curl_text:
-            inp_tw.insert("1.0", curl_text)
-
-        vpane.add(inp_frame, minsize=80, height=200)
-
-        # ── Diff view area (highlighted)
-        diff_frame = tk.Frame(vpane, bg=BG)
-        diff_lbl = tk.Label(diff_frame, text="DIFF VIEW", font=self.fn_badge,
-                            bg=BG, fg=TEXT_DIM, anchor="w")
-        diff_lbl.pack(fill="x", padx=6, pady=(4,0))
-
-        diff_wrap = tk.Frame(diff_frame, bg=BORDER)
-        diff_wrap.pack(fill="both", expand=True, padx=2, pady=(2,2))
-        diff_tw = tk.Text(diff_wrap, bg=BG2, fg=TEXT, font=self.fn_monos,
-                          wrap="none", relief="flat", padx=8, pady=6,
-                          state="disabled", bd=0)
-        sb_dx = tk.Scrollbar(diff_wrap, orient="horizontal",
-                              command=diff_tw.xview, bg=BG3, troughcolor=BG2, bd=0)
-        sb_dy = tk.Scrollbar(diff_wrap, command=diff_tw.yview,
-                              bg=BG3, troughcolor=BG2, bd=0)
-        diff_tw.configure(xscrollcommand=sb_dx.set, yscrollcommand=sb_dy.set)
-        sb_dy.pack(side="right", fill="y")
-        sb_dx.pack(side="bottom", fill="x")
-        diff_tw.pack(fill="both", expand=True, padx=1, pady=1)
-
-        # Configure tags
-        diff_tw.tag_configure("added",   background=self.HL_ADDED,   foreground=self.FG_ADDED)
-        diff_tw.tag_configure("changed", background=self.HL_CHANGED, foreground=self.FG_CHANGED)
-        diff_tw.tag_configure("missing", background=self.HL_MISSING, foreground=self.FG_MISSING)
-        diff_tw.tag_configure("same",    background=self.HL_SAME,    foreground=TEXT)
-        diff_tw.tag_configure("linenum", foreground=TEXT_DIM)
-
-        vpane.add(diff_frame, minsize=80)
-
-        self.paned.add(outer, minsize=250)
-
-        panel = {
-            "outer":      outer,
-            "vpane":      vpane,
-            "inp_tw":     inp_tw,
-            "diff_tw":    diff_tw,
-            "label_var":  label_var,
-            "diff_badge": diff_badge,
-        }
-        self._panels.append(panel)
-        return panel
-
-    def _remove_panel(self, outer_frame):
-        if len(self._panels) <= 2:
-            messagebox.showinfo("","Cần ít nhất 2 panel để so sánh."); return
-        idx = next((i for i,p in enumerate(self._panels) if p["outer"] is outer_frame), None)
-        if idx is None: return
-        self.paned.remove(outer_frame)
-        outer_frame.destroy()
-        self._panels.pop(idx)
-        self._run_compare()
-
-    def _rename_panel(self, label_var):
-        new = simpledialog.askstring("Đổi tên", "Tên panel:",
-                                     initialvalue=label_var.get(), parent=self)
-        if new and new.strip():
-            label_var.set(new.strip())
-
-    def _load_from_tabs(self):
-        """Nạp curl từ các tab đang mở trong app chính."""
-        app = self.parent_app
-        open_curls = []
-        for tab in app.tabs:
-            if hasattr(tab,"_curl_tw"):
-                curl = tab._curl_tw.get("1.0","end").strip()
-                if curl and not getattr(tab,"_ph_active",False):
-                    open_curls.append((tab.name, curl))
-
-        if not open_curls:
-            messagebox.showinfo("","Chưa có curl nào trong các tab đang mở."); return
-
-        # Clear existing panels
-        for p in list(self._panels):
-            self.paned.remove(p["outer"])
-            p["outer"].destroy()
-        self._panels.clear()
-
-        for name, curl in open_curls:
-            p = self._add_panel(curl)
-            p["label_var"].set(name)
-
-        if len(self._panels) < 2:
-            self._add_panel("")
-        self._run_compare()
-
-    # ── DIFF ENGINE ───────────────────────────
-    def _normalize_curl(self, raw: str) -> list[str]:
-        """
-        Chuẩn hóa curl thành danh sách các token dạng 'KEY: value'
-        để so sánh semantic, không phụ thuộc thứ tự flags.
-        """
-        # Merge line continuations
-        s = re.sub(r'\\\s*\n\s*', ' ', raw)
-        s = re.sub(r'\^\s*\n\s*', ' ', s).strip()
-
-        lines = []
-        try:
-            tokens = shlex.split(s)
-        except Exception:
-            return raw.splitlines()
-
-        if not tokens: return []
-
-        # Extract method
-        method = "GET"
-        url    = ""
-        i = 1
-        parts = []
-
-        while i < len(tokens):
-            t = tokens[i]
-            if not t.startswith('-') and not url:
-                url = t
-            elif t in ('-X','--request'):
-                i += 1
-                method = tokens[i].upper() if i < len(tokens) else method
-            elif t in ('-H','--header') and i+1 < len(tokens):
-                i += 1; parts.append(f"Header: {tokens[i]}")
-            elif t in ('-d','--data','--data-raw','--data-binary','--data-ascii') and i+1 < len(tokens):
-                i += 1
-                try:
-                    obj = json.loads(tokens[i])
-                    for k,v in (obj.items() if isinstance(obj,dict) else []):
-                        parts.append(f"Body.{k}: {json.dumps(v, ensure_ascii=False)}")
-                except Exception:
-                    parts.append(f"Body: {tokens[i]}")
-            elif t in ('-u','--user') and i+1 < len(tokens):
-                i += 1; parts.append(f"Auth: {tokens[i]}")
-            elif t in ('-k','--insecure'):
-                parts.append("Option: insecure=true")
-            elif t in ('-L','--location'):
-                parts.append("Option: follow-redirect=true")
-            elif t in ('--max-time','-m') and i+1 < len(tokens):
-                i += 1; parts.append(f"Option: timeout={tokens[i]}")
-            elif t in ('-F','--form') and i+1 < len(tokens):
-                i += 1; parts.append(f"Form: {tokens[i]}")
-            i += 1
-
-        lines = [f"Method: {method}", f"URL: {url}"] + sorted(parts)
-        return lines
-
-    def _compute_diff(self, panels_lines: list[list[str]]) -> list[list[tuple]]:
-        """
-        So sánh n danh sách dòng.
-        Trả về list[panel_idx] → list[(line_text, tag)]
-        tag: 'same' | 'changed' | 'added' | 'missing'
-        """
-        if not panels_lines: return []
-        n      = len(panels_lines)
-        max_ln = max(len(p) for p in panels_lines)
-
-        results = [[] for _ in range(n)]
-
-        for row in range(max_ln):
-            row_vals = []
-            for pi in range(n):
-                lines = panels_lines[pi]
-                row_vals.append(lines[row] if row < len(lines) else None)
-
-            present = [v for v in row_vals if v is not None]
-            all_same = len(set(present)) == 1
-
-            for pi, val in enumerate(row_vals):
-                if val is None:
-                    results[pi].append(("", "missing"))
-                elif all_same:
-                    results[pi].append((val, "same"))
-                else:
-                    # Check if this exact value appears in at least one other panel
-                    others = [row_vals[j] for j in range(n) if j != pi and row_vals[j] is not None]
-                    if val in others:
-                        # Value exists elsewhere → mark as "changed" only in panels that differ
-                        unique_vals = set(present)
-                        if len(unique_vals) == 1:
-                            results[pi].append((val, "same"))
-                        else:
-                            majority = max(set(present), key=present.count)
-                            tag = "same" if val == majority else "changed"
-                            results[pi].append((val, tag))
-                    else:
-                        results[pi].append((val, "changed"))
-
-        return results
-
-    def _run_compare(self):
-        """Parse tất cả panels, compute diff, render."""
-        if not self._panels: return
-
-        # Collect normalized lines from each panel
-        panels_lines = []
-        raw_texts    = []
-        for p in self._panels:
-            raw = p["inp_tw"].get("1.0","end").strip()
-            raw_texts.append(raw)
-            panels_lines.append(self._normalize_curl(raw) if raw else [])
-
-        diff_results = self._compute_diff(panels_lines)
-
-        # Count diffs per panel
-        total_diffs = 0
-
-        for pi, panel in enumerate(self._panels):
-            dw = panel["diff_tw"]
-            dw.config(state="normal"); dw.delete("1.0","end")
-
-            if pi >= len(diff_results):
-                dw.config(state="disabled"); continue
-
-            panel_diff = diff_results[pi]
-            diff_count = sum(1 for _, tag in panel_diff if tag != "same")
-            total_diffs = max(total_diffs, diff_count)
-
-            for ln, (text, tag) in enumerate(panel_diff, 1):
-                # Line number
-                dw.insert("end", f"{ln:>3}  ", "linenum")
-                display = text if text else "·" * 30
-                dw.insert("end", display + "\n", tag)
-
-            dw.config(state="disabled")
-
-            # Update badge
-            badge_txt  = f"  {diff_count} khác biệt" if diff_count else "  ✓ Giống"
-            badge_col  = YELLOW_C if diff_count else GREEN
-            panel["diff_badge"].config(text=badge_txt, fg=badge_col)
-
-        # Summary
-        same_count = sum(1 for _,tag in (diff_results[0] if diff_results else []) if tag=="same")
-        total      = len(diff_results[0]) if diff_results else 0
-        self.result_lbl.config(
-            text=f"  {len(self._panels)} panels  ·  {total} dòng  ·  {same_count} giống  ·  {total-same_count} khác"
-        )
-
-    # ── helpers ───────────────────────────────
-    def _mkbtn(self, parent, text, cmd, side="left", pad=(0,0)):
-        b = tk.Button(parent, text=text, font=self.fn_label,
-                      bg=BG3, fg=TEXT, activebackground=BORDER,
-                      relief="flat", cursor="hand2",
-                      padx=10, pady=5, command=cmd, bd=0)
-        b.pack(side=side, padx=pad)
-        return b
-
-# ══════════════════════════════════════════════
-if __name__ == "__main__":
-    app = CurlRunnerApp()
-    app.mainloop()
-#py -m PyInstaller --onefile --noconsole --name "CurlRunner" curl_runner_gui.py

@@ -27,6 +27,9 @@
 | 🗂 **Collections** | Nhóm và lưu các request hay dùng |
 | 🌍 **Environments** | Quản lý biến `{{base_url}}`, `{{token}}` theo từng môi trường |
 | 🎨 **JSON Highlight** | Tô màu JSON response (key, string, number, boolean, null) |
+| 🔎 **Response Search** | Tìm kiếm trong Body / Headers / Info / Log / AI bằng `Ctrl+F`, highlight và Next/Prev |
+| 🤖 **AI phân tích lỗi** | Dùng Ollama local miễn phí để đọc response, tìm lỗi/bug và gợi ý cách xử lý |
+| 🚀 **Large response friendly** | Giới hạn preview và bỏ syntax highlight khi response quá lớn để UI không bị lag |
 | 🔠 **Auto Decode** | Tự detect encoding từ raw bytes — UTF-8, Windows-1252, TIS-620... |
 | 💾 **Lưu response** | Export response body ra file `.json` / `.txt` |
 | 🖥 **Dark UI** | Giao diện tối theo phong cách Postman |
@@ -38,6 +41,7 @@
 ### Yêu cầu
 - Python 3.8+
 - pip
+- Ollama nếu muốn dùng AI analysis local miễn phí
 
 ### Cài thư viện
 
@@ -48,14 +52,14 @@ pip install requests charset-normalizer
 ### Chạy trực tiếp
 
 ```bash
-python curl_runner_gui.py
+python main.py
 ```
 
 ### Đóng gói thành `.exe` (không cần Python)
 
 ```bash
 pip install pyinstaller
-python -m PyInstaller --onefile --noconsole --name CurlRunner curl_runner_gui.py
+python -m PyInstaller --onefile --noconsole --name CurlRunner main.py
 ```
 
 File `.exe` xuất ra tại `dist\CurlRunner.exe` — double-click là chạy.
@@ -195,15 +199,66 @@ Checkbox **Auto Decode** ở hàng options:
 
 Encoding đang dùng hiển thị trong tab **Request Info**.
 
+### Tìm kiếm trong response
+
+Response panel có thanh **Search** để tìm trong tab đang mở:
+
+- Nhấn `Ctrl+F` để focus vào ô search
+- `Enter` để tới kết quả tiếp theo
+- `Shift+Enter` hoặc **Prev** để quay lại kết quả trước
+- Bật **Aa** để phân biệt hoa/thường
+- Hoạt động với **Body**, **Headers**, **Info**, **Log** và **AI**
+
+### AI phân tích lỗi response
+
+Nhấn **AI Analyze** sau khi gửi request để AI đọc request/response đã được redact và đưa ra:
+
+- Tóm tắt tình trạng response
+- Bằng chứng lỗi từ status/header/body
+- Nguyên nhân có khả năng cao
+- Gợi ý sửa API/client/request
+- Các bước kiểm tra tiếp theo
+
+Mặc định app dùng **Ollama local** nên không cần billing API.
+
+```powershell
+winget install --id Ollama.Ollama -e
+ollama pull llama3.2
+```
+
+Kiểm tra Ollama đang chạy:
+
+```powershell
+Invoke-RestMethod http://localhost:11434/api/tags
+```
+
+Tuỳ chọn cấu hình:
+
+| Biến môi trường | Mô tả |
+|---|---|
+| `OLLAMA_MODEL` | Chọn model local, ví dụ `llama3.2` |
+| `OLLAMA_BASE_URL` | Đổi endpoint Ollama, mặc định `http://localhost:11434` |
+| `AI_PROVIDER=openai` | Dùng OpenAI API thay vì Ollama |
+| `OPENAI_API_KEY` | API key khi dùng OpenAI |
+| `OPENAI_MODEL` | Model OpenAI, mặc định `gpt-5.4-mini` |
+
+Trước khi gửi nội dung cho AI, app tự redact các header/body nhạy cảm như `Authorization`, `Cookie`, token, API key, password và secret.
+
 ---
 
 ## 📁 Cấu trúc project
 
 ```
 Curl-runner/
-├── curl_runner_gui.py   # GUI desktop (tkinter) — v4
-├── curl_runner.py       # CLI version (terminal)
-├── build_exe.bat        # Script đóng gói .exe
+├── main.py              # Entry point
+├── app.py               # Tkinter GUI
+├── core.py              # Parse curl, execute request, decode, AI analysis
+├── models.py            # Tab/request state
+├── store.py             # History, collections, environments
+├── constants.py         # Theme, colors, fonts
+├── ui_compare.py        # Compare curl popup
+├── ui_widgets.py        # Shared UI widgets
+├── CurlRunner.spec      # PyInstaller spec
 └── README.md
 ```
 
@@ -236,29 +291,6 @@ C:\Users\<tên>\.curl_runner\
 
 ---
 
-## 🖥 CLI Version
-
-Ngoài GUI, project còn có CLI chạy trên terminal:
-
-```bash
-# Paste curl trực tiếp
-python curl_runner.py "curl https://httpbin.org/get"
-
-# Import từ file
-python curl_runner.py -f request.txt
-
-# Lưu response ra file
-python curl_runner.py -f request.txt -o response.json
-
-# Interactive mode (paste rồi Enter 2 lần)
-python curl_runner.py
-
-# Xem hướng dẫn
-python curl_runner.py --help
-```
-
----
-
 ## 🛠 Cấu hình VS Code
 
 Thêm vào `.vscode/settings.json` để tắt Pylance warnings với tkinter:
@@ -283,6 +315,7 @@ Thêm vào `.vscode/settings.json` để tắt Pylance warnings với tkinter:
 | `charset-normalizer` | Auto-detect encoding của response |
 | `pyinstaller` | Đóng gói thành `.exe` (tuỳ chọn) |
 | `tkinter` | GUI (có sẵn trong Python) |
+| `ollama` | AI analysis local miễn phí (tuỳ chọn, chạy ngoài Python) |
 
 ---
 
@@ -294,8 +327,8 @@ Thêm vào `.vscode/settings.json` để tắt Pylance warnings với tkinter:
 - [x] Pre-request Script
 - [x] Beautify JSON body
 - [x] So sánh Curl (diff n panels)
-- [ ] Tìm kiếm trong response (Ctrl+F)
-- [ ] AI phân tích lỗi response
+- [x] Tìm kiếm trong response (Ctrl+F)
+- [x] AI phân tích lỗi response bằng Ollama local
 
 ---
 

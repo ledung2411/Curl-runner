@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['curl_runner_gui.py'],
+    ['main.py'],
     pathex=[],
     binaries=[],
     datas=[],
