@@ -147,6 +147,7 @@ def analyze_response_with_ai(api_key: str, context_json: str, model: str = "gpt-
         "store": False,
         "max_output_tokens": 1200,
         "instructions": (
+            "Respond in Vietnamese. Use clear, practical Vietnamese for developers. "
             "You are a senior API debugging assistant. Analyze the HTTP response and "
             "request context. Identify likely backend/client bugs, bad input, auth issues, "
             "schema mismatches, timeout/rate-limit clues, and suspicious response content. "
@@ -237,6 +238,7 @@ def analyze_response_with_ollama(
     base = base_url.rstrip("/")
     model_used = choose_ollama_model(model, base)
     prompt = (
+        "Respond in Vietnamese. Use clear, practical Vietnamese for developers. "
         "You are a senior API debugging assistant. Analyze the redacted HTTP "
         "request/response context below. Identify likely backend/client bugs, bad input, "
         "auth issues, schema mismatches, timeout/rate-limit clues, and suspicious response "

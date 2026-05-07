@@ -35,4 +35,5 @@ class RequestTab:
         self._var_redirect= None   # tk.BooleanVar
         self._var_decode  = None   # tk.BooleanVar
         self._timeout_var = None   # tk.StringVar
+        self._repeat_var  = None   # tk.StringVar
         self._ph_active   = False  # placeholder active flag

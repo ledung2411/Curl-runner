@@ -76,6 +76,10 @@ class CurlRunnerApp(tk.Tk):
         self.rtab_ai:      tk.Button = None  # type: ignore
         self.ai_analyze_btn: tk.Button = None  # type: ignore
         self.openai_api_key = ""
+        default_ai_provider = os.environ.get("AI_PROVIDER", "ollama").strip().lower()
+        if default_ai_provider not in ("ollama", "openai"):
+            default_ai_provider = "ollama"
+        self.ai_provider_var = tk.StringVar(value=default_ai_provider)
         self.active_resp_tab = "body"
         self.resp_search_var: tk.StringVar = None  # type: ignore
         self.resp_case_var: tk.BooleanVar = None  # type: ignore
@@ -668,6 +672,12 @@ class CurlRunnerApp(tk.Tk):
         tk.Entry(opt, textvariable=tab._timeout_var, font=self.fn_monos,
                  bg=BG3, fg=TEXT, insertbackground=ACCENT,
                  relief="flat", width=5, bd=0).pack(side="left")
+        tk.Label(opt, text="Repeat:", font=self.fn_label,
+                 bg=BG, fg=TEXT_DIM).pack(side="left", padx=(10,4))
+        tab._repeat_var = tk.StringVar(value="1")
+        tk.Entry(opt, textvariable=tab._repeat_var, font=self.fn_monos,
+                 bg=BG3, fg=TEXT, insertbackground=ACCENT,
+                 relief="flat", width=5, bd=0).pack(side="left")
 
         # ── Send button
         send_btn = tk.Button(
@@ -914,12 +924,28 @@ class CurlRunnerApp(tk.Tk):
         self._save_to_coll_dialog(curl_str)
 
     # ── SEND ──────────────────────────────────
+    def _get_repeat_count(self, tab) -> int:
+        raw = tab._repeat_var.get().strip() if hasattr(tab, "_repeat_var") else "1"
+        try:
+            value = int(raw)
+        except Exception:
+            raise ValueError("Repeat phải là số nguyên >= 1")
+        if value < 1:
+            raise ValueError("Repeat phải >= 1")
+        if value > 1000:
+            raise ValueError("Repeat tối đa là 1000 để tránh gọi API quá nhiều.")
+        return value
+
     def _send(self, tab):
         if not hasattr(tab,"_curl_tw"): return
         self._save_tab_state(tab)
         curl_str = tab._curl_tw.get("1.0","end").strip()
         if not curl_str or getattr(tab,"_ph_active",False):
             messagebox.showwarning("Thiếu input","Vui lòng nhập curl command."); return
+        try:
+            repeat_count = self._get_repeat_count(tab)
+        except ValueError as e:
+            messagebox.showwarning("Repeat không hợp lệ", str(e)); return
 
         # Run pre-request script
         env = dict(self.environments.get(self.active_env,{}))
@@ -931,8 +957,12 @@ class CurlRunnerApp(tk.Tk):
 
         curl_resolved = apply_env(curl_str, env)
 
-        tab._send_btn.config(state="disabled", text="⏳  Đang gửi...")
-        tab._status_lbl.config(text="Đang gửi...", fg=TEXT_DIM)
+        btn_text = "⏳  Đang gửi..." if repeat_count == 1 else f"⏳  Gửi 1/{repeat_count}..."
+        tab._send_btn.config(state="disabled", text=btn_text)
+        tab._status_lbl.config(
+            text="Đang gửi..." if repeat_count == 1 else f"Auto call: 1/{repeat_count}",
+            fg=TEXT_DIM
+        )
         self.status_badge.config(text="...", fg=TEXT_DIM, bg=BG3)
         self.time_label.config(text=""); self.size_label.config(text="")
 
@@ -943,10 +973,30 @@ class CurlRunnerApp(tk.Tk):
                 parsed["allow_redirects"] = tab._var_redirect.get()
                 try:    parsed["timeout"] = float(tab._timeout_var.get())
                 except: parsed["timeout"] = 30
-                resp, elapsed = execute_request(parsed)
-                self.after(0, lambda: self._display(tab, parsed, resp, elapsed, curl_str, pre_logs))
+                repeat_logs = []
+                resp = None
+                elapsed = 0
+                for attempt in range(1, repeat_count + 1):
+                    self.after(0, lambda a=attempt: (
+                        tab._send_btn.config(text=f"⏳  Gửi {a}/{repeat_count}..."),
+                        tab._status_lbl.config(text=f"Auto call: {a}/{repeat_count}", fg=TEXT_DIM)
+                    ))
+                    resp, elapsed = execute_request(parsed)
+                    if repeat_count > 1:
+                        repeat_logs.append(
+                            f"🔁 Attempt {attempt}/{repeat_count}: "
+                            f"{resp.status_code} {resp.reason} · {elapsed:.0f} ms"
+                        )
+                logs = list(pre_logs)
+                if repeat_logs:
+                    logs.append(f"🔁 Auto call complete: {repeat_count} request(s)")
+                    logs.extend(repeat_logs)
+                self.after(0, lambda: self._display(
+                    tab, parsed, resp, elapsed, curl_str, logs, repeat_count
+                ))
             except Exception as e:
-                self.after(0, lambda: self._show_error(tab, str(e)))
+                error_msg = str(e) or repr(e) or e.__class__.__name__
+                self.after(0, lambda error_msg=error_msg: self._show_error(tab, error_msg))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -969,6 +1019,20 @@ class CurlRunnerApp(tk.Tk):
         self._mkbtn(ss, "Copy", self._copy_response, side="right")
         self._mkbtn(ss, "Save", self._save_response,  side="right", pad=(0,6))
         self.ai_analyze_btn = self._mkbtn(ss, "AI Analyze", self._analyze_response, side="right", pad=(0,6))
+
+        ai_opts = tk.Frame(frame, bg=BG3)
+        ai_opts.pack(fill="x", pady=(0,6))
+        tk.Label(ai_opts, text="AI Analysis:", font=self.fn_label, bg=BG3,
+                 fg=TEXT_DIM).pack(side="left", padx=(9,8), pady=5)
+        for text, value in [("Free Local", "ollama"), ("Billing API", "openai")]:
+            tk.Radiobutton(
+                ai_opts, text=text, value=value,
+                variable=self.ai_provider_var,
+                command=self._on_ai_provider_change,
+                font=self.fn_label, bg=BG3, fg=TEXT_DIM,
+                activebackground=BG3, activeforeground=TEXT,
+                selectcolor=BG2, bd=0, padx=8,
+            ).pack(side="left")
 
         toolbar = tk.Frame(frame, bg=BG)
         toolbar.pack(fill="x", pady=(0,4))
@@ -1258,7 +1322,7 @@ class CurlRunnerApp(tk.Tk):
         self._schedule_response_search()
 
     # ── Display response ──────────────────────
-    def _display(self, tab, parsed, resp, elapsed, original_curl, pre_logs):
+    def _display(self, tab, parsed, resp, elapsed, original_curl, pre_logs, repeat_count: int = 1):
         tab.response = resp
         tab.parsed   = parsed
         tab.elapsed  = elapsed
@@ -1287,7 +1351,13 @@ class CurlRunnerApp(tk.Tk):
 
         tab._send_btn.config(state="normal", text="▶  SEND REQUEST")
         url_s = parsed['url'][:52] + ("..." if len(parsed['url'])>52 else "")
-        tab._status_lbl.config(text=f"✓  {parsed['method']}  →  {url_s}", fg=GREEN)
+        if repeat_count > 1:
+            tab._status_lbl.config(
+                text=f"✓  Auto call complete: {repeat_count}x  ·  latest {parsed['method']} → {url_s}",
+                fg=GREEN
+            )
+        else:
+            tab._status_lbl.config(text=f"✓  {parsed['method']}  →  {url_s}", fg=GREEN)
 
         # Auto-show Script Log tab if script ran
         if pre_logs:
@@ -1300,6 +1370,7 @@ class CurlRunnerApp(tk.Tk):
             "method":  parsed["method"], "url": parsed["url"],
             "curl":    original_curl,    "status": sc,
             "elapsed": round(elapsed),
+            "repeat":  repeat_count,
         })
         self.history = self.history[-500:]
         store.save_history(self.history)
@@ -1414,8 +1485,8 @@ class CurlRunnerApp(tk.Tk):
         if key:
             return key
         key = simpledialog.askstring(
-            "OpenAI API key",
-            "OPENAI_API_KEY:",
+            "Billing API key",
+            "Nhập OpenAI API key để dùng Billing API:",
             parent=self,
             show="*",
         )
@@ -1423,8 +1494,16 @@ class CurlRunnerApp(tk.Tk):
             self.openai_api_key = key.strip()
         return self.openai_api_key
 
+    def _on_ai_provider_change(self) -> None:
+        if self.ai_provider_var.get() != "openai":
+            return
+        if self._get_openai_key():
+            return
+        self.ai_provider_var.set("ollama")
+        messagebox.showinfo("", "Chưa nhập API key. Đã chuyển về Free Local.")
+
     def _resolve_ai_provider(self) -> tuple[str, str, str]:
-        provider = os.environ.get("AI_PROVIDER", "ollama").strip().lower()
+        provider = self.ai_provider_var.get().strip().lower()
         if provider not in ("ollama", "openai"):
             provider = "ollama"
 
