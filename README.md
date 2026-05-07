@@ -15,6 +15,12 @@
 
 ---
 
+## 📘 User Manual
+
+Xem hướng dẫn chi tiết tại [USER_MANUAL.md](USER_MANUAL.md).
+
+---
+
 ## ✨ Tính năng
 
 | Tính năng | Mô tả |
@@ -275,14 +281,63 @@ Ví dụ:
 - **Stop** để dừng trước group tiếp theo
 - **Stop on fail** để tự dừng scenario nếu một step lỗi
 
-Kết quả chạy hiển thị trực tiếp trên bảng step và vùng log. Mỗi step có status, thời gian chạy, pass/fail. Hiện tại pass là HTTP status `2xx` hoặc `3xx`; `4xx`, `5xx` hoặc exception được xem là fail.
+Kết quả chạy hiển thị trực tiếp trên bảng step và vùng log. Mỗi step có status, thời gian chạy, pass/fail.
+
+Nếu step không khai báo assertion, pass mặc định là HTTP status `2xx` hoặc `3xx`. Nếu có assertion, pass/fail sẽ theo toàn bộ assertion của step.
+
+#### Extract variables
+
+Mỗi step có vùng **EXTRACTORS** để lấy dữ liệu từ response và lưu vào runtime env cho các group sau.
+
+Cú pháp:
+
+```text
+variable_name = json:$.path.to.value
+variable_name = header:Header-Name
+variable_name = regex:pattern-with-capture-group
+```
+
+Ví dụ login lấy token:
+
+```text
+token = json:$.data.token
+request_id = header:X-Request-Id
+order_id = regex:"orderId"\s*:\s*"([^"]+)"
+```
+
+Sau khi extract thành công, step ở group sau có thể dùng:
+
+```bash
+curl {{base_url}}/profile \
+  -H 'Authorization: Bearer {{token}}'
+```
+
+Lưu ý: step cùng một group chạy parallel, nên biến extract từ step trong group đó chỉ chắc chắn dùng được từ group tiếp theo.
+
+#### Assertions
+
+Mỗi step có vùng **ASSERTIONS** để kiểm tra response.
+
+Cú pháp hỗ trợ:
+
+```text
+status == 200
+status in 200,201,204
+body contains success
+body not_contains error
+header Content-Type contains json
+header X-Request-Id != ""
+json $.data.id exists
+json $.ok == true
+json $.count >= 1
+```
+
+Nếu một assertion fail, step fail. Nếu bật **Stop on fail**, scenario dừng sau group hiện tại.
 
 #### Lưu ý MVP
 
-API Scenario bản đầu tập trung vào chạy sequential/parallel. Các phần nên thêm tiếp theo:
+Các phần nên thêm tiếp theo:
 
-- Extract variable từ response để truyền sang step sau
-- Assertions chi tiết theo status/header/body/JSON path
 - Export report HTML/CSV/JUnit
 - Delay giữa các group/step
 - Chạy scenario theo data CSV/JSON
@@ -481,6 +536,8 @@ Thêm vào `.vscode/settings.json` để tắt Pylance warnings với tkinter:
 - [x] Beautify JSON body
 - [x] Auto call N times
 - [x] API Scenario sequential/parallel groups
+- [x] API Scenario extract variables
+- [x] API Scenario assertions
 - [x] So sánh Curl (diff n panels)
 - [x] Tìm kiếm trong response (Ctrl+F)
 - [x] AI phân tích lỗi response bằng Ollama local

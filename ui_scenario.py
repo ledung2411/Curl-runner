@@ -2,6 +2,8 @@
 # type: ignore
 from __future__ import annotations
 
+import json
+import re
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -14,7 +16,7 @@ from constants import (
     GREEN, RED_C, YELLOW_C,
     SURFACE_ACTIVE, TITLEBAR_BG, FONT_FAMILY, FONT_FAMILY_MONO,
 )
-from core import apply_env, parse_curl, execute_request
+from core import apply_env, parse_curl, execute_request, decode_response
 import store
 
 if TYPE_CHECKING:
@@ -186,6 +188,22 @@ class ScenarioWindow(tk.Toplevel):
         curl_sb.pack(side="right", fill="y")
         self.step_curl_tw.pack(fill="both", expand=True, padx=1, pady=1)
 
+        qa = tk.PanedWindow(editor, orient="horizontal", bg=BORDER,
+                            sashwidth=5, sashrelief="flat", bd=0)
+        qa.pack(fill="both", padx=8, pady=(0, 8))
+        extract_frame = self._build_rule_panel(
+            qa,
+            "EXTRACTORS",
+            "token = json:$.data.token\nrequest_id = header:X-Request-Id",
+        )
+        assert_frame = self._build_rule_panel(
+            qa,
+            "ASSERTIONS",
+            "status == 200\nbody contains success\njson $.ok == true",
+        )
+        qa.add(extract_frame, minsize=280)
+        qa.add(assert_frame, minsize=280)
+
         log_wrap = tk.Frame(right, bg=BORDER)
         log_wrap.pack(fill="both", expand=True, pady=(8, 0))
         self.log_tw = tk.Text(
@@ -203,6 +221,50 @@ class ScenarioWindow(tk.Toplevel):
         self.log_tw.tag_configure("err", foreground=RED_C)
         self.log_tw.tag_configure("run", foreground=YELLOW_C)
         self.log_tw.tag_configure("dim", foreground=TEXT_DIM)
+
+    def _build_rule_panel(self, parent: tk.Widget, title: str, placeholder: str) -> tk.Frame:
+        frame = tk.Frame(parent, bg=BG2)
+        hdr = tk.Frame(frame, bg=BG2)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text=title, font=self.fn_badge,
+                 bg=BG2, fg=TEXT_DIM).pack(side="left", padx=8, pady=(6, 2))
+        tk.Label(hdr, text="one rule per line", font=self.fn_small,
+                 bg=BG2, fg=TEXT_DIM).pack(side="right", padx=8, pady=(6, 2))
+        wrap = tk.Frame(frame, bg=BORDER)
+        wrap.pack(fill="both", expand=True, padx=1, pady=(0, 1))
+        tw = tk.Text(
+            wrap, bg=BG2, fg=TEXT, insertbackground=ACCENT,
+            font=self.fn_monos, wrap="word", relief="flat",
+            padx=8, pady=6, selectbackground=ACCENT,
+            selectforeground="#171717", undo=True, bd=0, height=5
+        )
+        sb = tk.Scrollbar(wrap, command=tw.yview, bg=BG3, troughcolor=BG2, bd=0)
+        tw.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        tw.pack(fill="both", expand=True)
+        if title == "EXTRACTORS":
+            self.extract_tw = tw
+        else:
+            self.assert_tw = tw
+        tw.insert("1.0", placeholder)
+        tw.config(fg=TEXT_DIM)
+        tw.bind("<FocusIn>", lambda _e, w=tw, p=placeholder: self._clear_rule_placeholder(w, p))
+        tw.bind("<FocusOut>", lambda _e, w=tw, p=placeholder: self._restore_rule_placeholder(w, p))
+        return frame
+
+    def _clear_rule_placeholder(self, tw: tk.Text, placeholder: str) -> None:
+        if tw.get("1.0", "end").strip() == placeholder:
+            tw.delete("1.0", "end")
+            tw.config(fg=TEXT)
+
+    def _restore_rule_placeholder(self, tw: tk.Text, placeholder: str) -> None:
+        if not tw.get("1.0", "end").strip():
+            tw.insert("1.0", placeholder)
+            tw.config(fg=TEXT_DIM)
+
+    def _rule_text(self, tw: tk.Text) -> str:
+        text = tw.get("1.0", "end").strip()
+        return "" if tw.cget("fg") == TEXT_DIM else text
 
     # Scenario management
     def _current_scenario(self) -> dict:
@@ -294,6 +356,8 @@ class ScenarioWindow(tk.Toplevel):
             "curl": curl,
             "group": group,
             "enabled": True,
+            "extractors": "",
+            "assertions": "",
         }
 
     def _add_step(self) -> None:
@@ -367,6 +431,8 @@ class ScenarioWindow(tk.Toplevel):
         step["group"] = group
         step["enabled"] = bool(self.step_enabled_var.get())
         step["curl"] = self.step_curl_tw.get("1.0", "end").strip()
+        step["extractors"] = self._rule_text(self.extract_tw)
+        step["assertions"] = self._rule_text(self.assert_tw)
         return True
 
     def _clear_editor(self) -> None:
@@ -374,6 +440,10 @@ class ScenarioWindow(tk.Toplevel):
         self.step_group_var.set("1")
         self.step_enabled_var.set(True)
         self.step_curl_tw.delete("1.0", "end")
+        self.extract_tw.delete("1.0", "end")
+        self.assert_tw.delete("1.0", "end")
+        self._restore_rule_placeholder(self.extract_tw, "token = json:$.data.token\nrequest_id = header:X-Request-Id")
+        self._restore_rule_placeholder(self.assert_tw, "status == 200\nbody contains success\njson $.ok == true")
 
     def _load_step_editor(self, step: dict) -> None:
         self.selected_step_id = step.get("id")
@@ -382,6 +452,18 @@ class ScenarioWindow(tk.Toplevel):
         self.step_enabled_var.set(bool(step.get("enabled", True)))
         self.step_curl_tw.delete("1.0", "end")
         self.step_curl_tw.insert("1.0", step.get("curl", ""))
+        self.extract_tw.delete("1.0", "end")
+        self.assert_tw.delete("1.0", "end")
+        if step.get("extractors", "").strip():
+            self.extract_tw.insert("1.0", step.get("extractors", ""))
+            self.extract_tw.config(fg=TEXT)
+        else:
+            self._restore_rule_placeholder(self.extract_tw, "token = json:$.data.token\nrequest_id = header:X-Request-Id")
+        if step.get("assertions", "").strip():
+            self.assert_tw.insert("1.0", step.get("assertions", ""))
+            self.assert_tw.config(fg=TEXT)
+        else:
+            self._restore_rule_placeholder(self.assert_tw, "status == 200\nbody contains success\njson $.ok == true")
         self._select_step(self.selected_step_id)
 
     def _on_step_select(self, _=None) -> None:
@@ -472,6 +554,153 @@ class ScenarioWindow(tk.Toplevel):
         self._refresh_steps()
         self._log(f"Imported {added} open tab(s).", "ok" if added else "dim")
 
+    # Extractors / assertions
+    def _active_rule_lines(self, text: str) -> list[str]:
+        out = []
+        for line in (text or "").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                out.append(line)
+        return out
+
+    def _extract_values(self, rules: str, resp, body_text: str) -> tuple[dict[str, str], list[str]]:
+        extracted: dict[str, str] = {}
+        logs: list[str] = []
+        headers = {str(k).lower(): str(v) for k, v in dict(resp.headers).items()}
+        body_json = None
+        json_loaded = False
+
+        for line in self._active_rule_lines(rules):
+            m = re.match(r"^([A-Za-z_]\w*)\s*=\s*(json|header|regex)\s*:(.+)$", line, re.I)
+            if not m:
+                raise ValueError(f"Extractor không hợp lệ: {line}")
+            name, source, selector = m.group(1), m.group(2).lower(), m.group(3).strip()
+            if source == "header":
+                value = headers.get(selector.lower())
+                if value is None:
+                    raise ValueError(f"Extractor `{name}` không tìm thấy header `{selector}`")
+            elif source == "regex":
+                hit = re.search(selector, body_text, re.S)
+                if not hit:
+                    raise ValueError(f"Extractor `{name}` không match regex")
+                value = hit.group(1) if hit.groups() else hit.group(0)
+            else:
+                if not json_loaded:
+                    body_json = json.loads(body_text)
+                    json_loaded = True
+                value = self._json_path_get(body_json, selector)
+            extracted[name] = str(value)
+            logs.append(f"extract {name}={str(value)[:80]}")
+        return extracted, logs
+
+    def _evaluate_assertions(self, rules: str, resp, body_text: str) -> tuple[bool, list[str]]:
+        lines = self._active_rule_lines(rules)
+        if not lines:
+            ok = 200 <= resp.status_code < 400
+            return ok, [f"default status 2xx/3xx => {'PASS' if ok else 'FAIL'}"]
+
+        details: list[str] = []
+        body_json = None
+        json_loaded = False
+        headers = {str(k).lower(): str(v) for k, v in dict(resp.headers).items()}
+
+        for line in lines:
+            passed = False
+            if m := re.match(r"^status\s*(==|!=|>=|<=|>|<)\s*(\d+)$", line, re.I):
+                actual = int(resp.status_code)
+                expected = int(m.group(2))
+                passed = self._compare(actual, m.group(1), expected)
+            elif m := re.match(r"^status\s+in\s+(.+)$", line, re.I):
+                expected_codes = [int(x.strip()) for x in m.group(1).split(",") if x.strip()]
+                passed = int(resp.status_code) in expected_codes
+            elif m := re.match(r"^body\s+(contains|not_contains)\s+(.+)$", line, re.I):
+                needle = self._strip_quotes(m.group(2).strip())
+                contains = needle in body_text
+                passed = contains if m.group(1).lower() == "contains" else not contains
+            elif m := re.match(r"^header\s+([^\s]+)\s+(contains|==|!=)\s+(.+)$", line, re.I):
+                actual = headers.get(m.group(1).lower(), "")
+                expected = self._strip_quotes(m.group(3).strip())
+                op = m.group(2).lower()
+                passed = (expected in actual) if op == "contains" else self._compare(str(actual), op, expected)
+            elif m := re.match(r"^json\s+(\S+)\s+exists$", line, re.I):
+                if not json_loaded:
+                    body_json = json.loads(body_text)
+                    json_loaded = True
+                self._json_path_get(body_json, m.group(1))
+                passed = True
+            elif m := re.match(r"^json\s+(\S+)\s*(==|!=|>=|<=|>|<)\s*(.+)$", line, re.I):
+                if not json_loaded:
+                    body_json = json.loads(body_text)
+                    json_loaded = True
+                actual = self._json_path_get(body_json, m.group(1))
+                expected = self._coerce_value(self._strip_quotes(m.group(3).strip()))
+                passed = self._compare(actual, m.group(2), expected)
+            else:
+                raise ValueError(f"Assertion không hợp lệ: {line}")
+            details.append(f"{'PASS' if passed else 'FAIL'}: {line}")
+            if not passed:
+                return False, details
+        return True, details
+
+    def _json_path_get(self, data: Any, path: str) -> Any:
+        if not path.startswith("$"):
+            raise ValueError(f"JSON path phải bắt đầu bằng `$`: {path}")
+        cur = data
+        for key, idx in re.findall(r"\.([A-Za-z_][\w-]*)|\[(\d+)\]", path[1:]):
+            if key:
+                if not isinstance(cur, dict) or key not in cur:
+                    raise ValueError(f"Không tìm thấy JSON path `{path}`")
+                cur = cur[key]
+            else:
+                i = int(idx)
+                if not isinstance(cur, list) or i >= len(cur):
+                    raise ValueError(f"Không tìm thấy JSON path `{path}`")
+                cur = cur[i]
+        return cur
+
+    def _strip_quotes(self, value: str) -> str:
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            return value[1:-1]
+        return value
+
+    def _coerce_value(self, value: str) -> Any:
+        lower = value.lower()
+        if lower == "true":
+            return True
+        if lower == "false":
+            return False
+        if lower == "null":
+            return None
+        try:
+            return int(value)
+        except Exception:
+            pass
+        try:
+            return float(value)
+        except Exception:
+            return value
+
+    def _compare(self, actual: Any, op: str, expected: Any) -> bool:
+        if op == "==":
+            return actual == expected or str(actual) == str(expected)
+        if op == "!=":
+            return not self._compare(actual, "==", expected)
+        try:
+            left = float(actual)
+            right = float(expected)
+        except Exception:
+            left = str(actual)
+            right = str(expected)
+        if op == ">":
+            return left > right
+        if op == ">=":
+            return left >= right
+        if op == "<":
+            return left < right
+        if op == "<=":
+            return left <= right
+        return False
+
     # Runner
     def _run_scenario(self) -> None:
         if self.running:
@@ -514,18 +743,27 @@ class ScenarioWindow(tk.Toplevel):
                 self._after_log(f"Group {group}: running {len(group_steps)} step(s) in parallel.", "run")
                 self._after_mark_group(group_steps, "RUNNING", "", "run")
                 max_workers = max(1, min(len(group_steps), 16))
+                group_extracts: dict[str, str] = {}
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = {executor.submit(self._run_step, step, runtime_env): step for step in group_steps}
+                    futures = {
+                        executor.submit(self._run_step, step, dict(runtime_env)): step
+                        for step in group_steps
+                    }
                     group_failed = False
                     for future in as_completed(futures):
                         step = futures[future]
                         result = future.result()
                         if result["ok"]:
                             passed += 1
+                            group_extracts.update(result.get("extracts", {}))
                         else:
                             failed += 1
                             group_failed = True
                         self.after(0, lambda s=step, r=result: self._apply_step_result(s, r))
+                if group_extracts:
+                    runtime_env.update(group_extracts)
+                    names = ", ".join(sorted(group_extracts))
+                    self._after_log(f"Group {group}: extracted variables for next group: {names}", "ok")
                 if group_failed and self.stop_on_fail_var.get():
                     self._after_log(f"Group {group}: failed, stopping scenario.", "err")
                     break
@@ -539,13 +777,18 @@ class ScenarioWindow(tk.Toplevel):
             parsed = parse_curl(curl)
             parsed["timeout"] = parsed.get("timeout", 30)
             resp, elapsed = execute_request(parsed)
-            ok = 200 <= resp.status_code < 400
+            body_text, _ = decode_response(resp, True)
+            extracts, extract_logs = self._extract_values(step.get("extractors", ""), resp, body_text)
+            ok, assertion_logs = self._evaluate_assertions(step.get("assertions", ""), resp, body_text)
+            detail = "; ".join(assertion_logs + extract_logs)
+            suffix = f" · {detail}" if detail else ""
             return {
                 "ok": ok,
                 "status": f"{resp.status_code} {resp.reason}",
                 "elapsed": f"{elapsed:.0f} ms",
                 "tag": "ok" if ok else "err",
-                "message": f"{name}: {resp.status_code} {resp.reason} · {elapsed:.0f} ms",
+                "message": f"{name}: {resp.status_code} {resp.reason} · {elapsed:.0f} ms{suffix}",
+                "extracts": extracts,
             }
         except Exception as exc:
             msg = str(exc) or repr(exc) or exc.__class__.__name__
@@ -555,6 +798,7 @@ class ScenarioWindow(tk.Toplevel):
                 "elapsed": "",
                 "tag": "err",
                 "message": f"{name}: ERROR · {msg}",
+                "extracts": {},
             }
 
     def _after_mark_group(self, steps: list[dict], status: str, elapsed: str, tag: str) -> None:
