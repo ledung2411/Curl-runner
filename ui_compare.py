@@ -1,13 +1,15 @@
-# ui_compare.py — Popup so sánh n curl side-by-side với highlight diff
+# ui_compare.py — Popup so sánh n nội dung side-by-side với highlight diff
 # type: ignore
 from __future__ import annotations
 
 import re
 import json
 import shlex
+import queue
+import threading
 import tkinter as tk
-from tkinter import messagebox, simpledialog, font as tkfont
-from typing import TYPE_CHECKING
+from tkinter import ttk, messagebox, simpledialog, font as tkfont
+from typing import TYPE_CHECKING, Any
 
 from constants import (
     BG, BG2, BG3, BORDER, ACCENT, TEXT, TEXT_DIM,
@@ -22,9 +24,9 @@ if TYPE_CHECKING:
 
 class CurlCompareWindow(tk.Toplevel):
     """
-    Popup so sánh n curl command side-by-side.
+    Popup so sánh n nội dung side-by-side.
     - Mỗi panel có thể kéo thả resize (PanedWindow dọc)
-    - Highlight diff theo line-level semantic
+    - Hỗ trợ Curl / JSON / Text / String
     - Thêm / xóa panel động
     """
 
@@ -36,16 +38,22 @@ class CurlCompareWindow(tk.Toplevel):
     FG_ADDED   = "#18794e"
     FG_CHANGED = "#946200"
     FG_MISSING = "#8b95a5"
+    RENDER_BATCH_ROWS = 250
 
     def __init__(self, parent: "CurlRunnerApp", initial_curls: list[str] | None = None):
         super().__init__(parent)
         self.parent_app = parent
-        self.title("⇄ So Sánh Curl")
+        self.title("⇄ So Sánh")
         self.geometry("1300x780")
         self.minsize(800, 500)
         self.configure(bg=BG)
 
         self._panels: list[dict] = []
+        self.mode_var = tk.StringVar(value="auto")
+        self._compare_job_id = 0
+        self._rendering = False
+        self._compare_queue: queue.Queue = queue.Queue()
+        self.compare_btn: tk.Button | None = None
         self._setup_fonts()
         self._build_ui()
 
@@ -70,13 +78,25 @@ class CurlCompareWindow(tk.Toplevel):
         tb.pack(fill="x", side="top")
         tb.pack_propagate(False)
 
-        tk.Label(tb, text="⇄  So Sánh Curl",
+        tk.Label(tb, text="⇄  So Sánh",
                  font=tkfont.Font(family=FONT_FAMILY, size=13, weight="bold"),
                  bg=TITLEBAR_BG, fg=TEXT).pack(side="left", padx=14, pady=10)
 
         self._mkbtn(tb, "＋ Thêm panel", self._add_panel,      side="left", pad=(4, 0))
-        self._mkbtn(tb, "⇄ So sánh",     self._run_compare,    side="left", pad=(6, 0))
+        self.compare_btn = self._mkbtn(tb, "⇄ So sánh", self._run_compare, side="left", pad=(6, 0))
         self._mkbtn(tb, "📋 Từ tab mở",  self._load_from_tabs, side="left", pad=(6, 0))
+
+        mode_box = tk.Frame(tb, bg=TITLEBAR_BG)
+        mode_box.pack(side="left", padx=(12, 0))
+        tk.Label(mode_box, text="Mode:", font=self.fn_small,
+                 bg=TITLEBAR_BG, fg=TEXT_DIM).pack(side="left", padx=(0, 4))
+        mode_cb = ttk.Combobox(
+            mode_box, textvariable=self.mode_var,
+            values=("auto", "curl", "json", "text", "string"),
+            state="readonly", width=9, font=self.fn_label,
+        )
+        mode_cb.pack(side="left")
+        mode_cb.bind("<<ComboboxSelected>>", lambda _e: self._run_compare())
 
         tk.Label(tb, text="Double-click tên để đổi  ·  Kéo thanh phân cách để resize",
                  font=tkfont.Font(family=FONT_FAMILY, size=8),
@@ -107,7 +127,7 @@ class CurlCompareWindow(tk.Toplevel):
     # ── Panel management ──────────────────────
     def _add_panel(self, curl_text: str = "") -> dict:
         idx  = len(self._panels)
-        name = f"Curl {idx + 1}"
+        name = f"Panel {idx + 1}"
 
         outer = tk.Frame(self.paned, bg=BG)
         outer.pack_propagate(True)
@@ -139,7 +159,7 @@ class CurlCompareWindow(tk.Toplevel):
 
         # Input area
         inp_frame = tk.Frame(vpane, bg=BG2)
-        tk.Label(inp_frame, text="INPUT", font=self.fn_badge,
+        tk.Label(inp_frame, text="INPUT  (curl / json / text / string)", font=self.fn_badge,
                  bg=BG2, fg=TEXT_DIM, anchor="w").pack(fill="x", padx=6, pady=(4, 0))
 
         inp_wrap = tk.Frame(inp_frame, bg=BORDER)
@@ -246,6 +266,81 @@ class CurlCompareWindow(tk.Toplevel):
         self._run_compare()
 
     # ── Diff engine ───────────────────────────
+    def _detect_mode(self, raws: list[str], explicit: str = "auto") -> str:
+        explicit = (explicit or "auto").strip().lower()
+        if explicit != "auto":
+            return explicit
+
+        nonempty = [raw.strip() for raw in raws if raw.strip()]
+        if not nonempty:
+            return "text"
+        if all(raw.lower().startswith("curl ") or raw.lower() == "curl" for raw in nonempty):
+            return "curl"
+        if all(self._try_json(raw) is not None for raw in nonempty):
+            return "json"
+        if all("\n" not in raw and len(raw) <= 500 for raw in nonempty):
+            return "string"
+        return "text"
+
+    def _try_json(self, raw: str) -> Any:
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None
+
+    def _normalize_input(self, raw: str, mode: str) -> list[str]:
+        if mode == "curl":
+            return self._normalize_curl(raw)
+        if mode == "json":
+            return self._normalize_json(raw)
+        if mode == "string":
+            return self._normalize_string(raw)
+        return self._normalize_text(raw)
+
+    def _normalize_text(self, raw: str) -> list[str]:
+        return raw.splitlines() or ([raw] if raw else [])
+
+    def _normalize_string(self, raw: str) -> list[str]:
+        text = raw.strip()
+        if not text:
+            return []
+        tokens = re.findall(r"\S+", text)
+        if len(tokens) > 1:
+            return [f"{idx:03}: {token}" for idx, token in enumerate(tokens, 1)]
+        # Long single-token strings are compared in fixed blocks to avoid creating
+        # one UI row per character. This does not truncate the input.
+        chunk = 96
+        return [
+            f"{(idx // chunk) + 1:06}: {text[idx:idx + chunk]}"
+            for idx in range(0, len(text), chunk)
+        ]
+
+    def _normalize_json(self, raw: str) -> list[str]:
+        data = self._try_json(raw)
+        if data is None:
+            return ["[Invalid JSON]"] + self._normalize_text(raw)
+        lines: list[str] = []
+
+        def walk(value: Any, path: str) -> None:
+            if isinstance(value, dict):
+                if not value:
+                    lines.append(f"{path}: {{}}")
+                for key in sorted(value.keys(), key=str):
+                    child_path = f"{path}.{key}" if path else str(key)
+                    walk(value[key], child_path)
+            elif isinstance(value, list):
+                if not value:
+                    lines.append(f"{path}: []")
+                for idx, item in enumerate(value):
+                    child_path = f"{path}[{idx}]" if path else f"[{idx}]"
+                    walk(item, child_path)
+            else:
+                rendered = json.dumps(value, ensure_ascii=False, sort_keys=True)
+                lines.append(f"{path or '$'}: {rendered}")
+
+        walk(data, "$")
+        return lines
+
     def _normalize_curl(self, raw: str) -> list[str]:
         """
         Parse curl thành danh sách dòng 'KEY: value' chuẩn hóa
@@ -269,7 +364,12 @@ class CurlCompareWindow(tk.Toplevel):
             elif t in ('-X', '--request') and i + 1 < len(tokens):
                 i += 1; method = tokens[i].upper()
             elif t in ('-H', '--header') and i + 1 < len(tokens):
-                i += 1; parts.append(f"Header: {tokens[i]}")
+                i += 1
+                if ":" in tokens[i]:
+                    key, _, value = tokens[i].partition(":")
+                    parts.append(f"Header.{key.strip()}: {value.strip()}")
+                else:
+                    parts.append(f"Header: {tokens[i]}")
             elif t in ('-d', '--data', '--data-raw', '--data-binary', '--data-ascii') \
                     and i + 1 < len(tokens):
                 i += 1
@@ -288,12 +388,54 @@ class CurlCompareWindow(tk.Toplevel):
             elif t in ('--max-time', '-m') and i + 1 < len(tokens):
                 i += 1; parts.append(f"Option: timeout={tokens[i]}")
             elif t in ('-F', '--form') and i + 1 < len(tokens):
-                i += 1; parts.append(f"Form: {tokens[i]}")
+                i += 1
+                if "=" in tokens[i]:
+                    key, _, value = tokens[i].partition("=")
+                    parts.append(f"Form.{key}: {value}")
+                else:
+                    parts.append(f"Form: {tokens[i]}")
             i += 1
 
         return [f"Method: {method}", f"URL: {url}"] + sorted(parts)
 
-    def _compute_diff(self, panels_lines: list[list[str]]) -> list[list[tuple]]:
+    def _compute_keyed_diff(self, panels_lines: list[list[str]]) -> list[list[tuple]]:
+        """Align semantic lines by key/path before comparing values."""
+        n = len(panels_lines)
+        results: list[list[tuple]] = [[] for _ in range(n)]
+        rows_by_panel: list[dict[str, str]] = []
+        ordered_keys: list[str] = []
+
+        for lines in panels_lines:
+            mapping: dict[str, str] = {}
+            for line in lines:
+                key = line.partition(":")[0].strip() if ":" in line else line.strip()
+                key = key or line
+                if key not in mapping:
+                    mapping[key] = line
+                    if key not in ordered_keys:
+                        ordered_keys.append(key)
+            rows_by_panel.append(mapping)
+
+        for key in ordered_keys:
+            row_vals = [rows_by_panel[pi].get(key) for pi in range(n)]
+            present = [v for v in row_vals if v is not None]
+            all_same = len(set(present)) == 1
+            missing_count = row_vals.count(None)
+            majority = max(set(present), key=present.count) if present else None
+            for pi, val in enumerate(row_vals):
+                if val is None:
+                    results[pi].append((f"{key}: (missing)", "missing"))
+                elif all_same:
+                    results[pi].append((val, "added" if missing_count else "same"))
+                elif missing_count and present.count(val) == 1:
+                    results[pi].append((val, "added"))
+                elif val == majority and present.count(val) > 1:
+                    results[pi].append((val, "same"))
+                else:
+                    results[pi].append((val, "changed"))
+        return results
+
+    def _compute_line_diff(self, panels_lines: list[list[str]]) -> list[list[tuple]]:
         """
         So sánh n danh sách dòng.
         Returns list[panel_idx] → list[(line_text, tag)]
@@ -312,6 +454,7 @@ class CurlCompareWindow(tk.Toplevel):
             ]
             present  = [v for v in row_vals if v is not None]
             all_same = len(set(present)) == 1
+            counts = {v: present.count(v) for v in set(present)}
 
             for pi, val in enumerate(row_vals):
                 if val is None:
@@ -320,49 +463,177 @@ class CurlCompareWindow(tk.Toplevel):
                     results[pi].append((val, "same"))
                 else:
                     majority = max(set(present), key=present.count)
-                    tag = "same" if val == majority else "changed"
+                    if val == majority and counts.get(val, 0) > 1:
+                        tag = "same"
+                    elif counts.get(val, 0) == 1:
+                        tag = "added"
+                    else:
+                        tag = "changed"
                     results[pi].append((val, tag))
 
         return results
 
     def _run_compare(self) -> None:
-        """Chạy diff engine và render kết quả vào tất cả panels."""
+        """Chạy diff engine ở background và render kết quả theo batch."""
         if not self._panels:
             return
 
-        panels_lines = [
-            self._normalize_curl(p["inp_tw"].get("1.0", "end").strip()) or []
-            for p in self._panels
-        ]
-        diff_results = self._compute_diff(panels_lines)
+        self._compare_job_id += 1
+        job_id = self._compare_job_id
+        raws = [p["inp_tw"].get("1.0", "end").strip() for p in self._panels]
+        requested_mode = self.mode_var.get().strip().lower()
+        labels = [p["label_var"].get() for p in self._panels]
+        self._rendering = True
+        if self.compare_btn:
+            self.compare_btn.config(state="disabled", text="Đang so sánh...")
+        self.result_lbl.config(
+            text=f"  Đang đọc {len(raws)} panel, xử lý background... Không giới hạn ký tự.",
+            fg=TEXT_DIM,
+        )
+        for panel in self._panels:
+            dw = panel["diff_tw"]
+            dw.config(state="normal")
+            dw.delete("1.0", "end")
+            dw.insert("end", "  Đang xử lý...\n", "linenum")
+            dw.config(state="disabled")
+            panel["diff_badge"].config(text="  working...", fg=TEXT_DIM)
+
+        def worker() -> None:
+            try:
+                mode = self._detect_mode(raws, requested_mode)
+                panels_lines = [self._normalize_input(raw, mode) or [] for raw in raws]
+                if mode in ("curl", "json"):
+                    diff_results = self._compute_keyed_diff(panels_lines)
+                else:
+                    diff_results = self._compute_line_diff(panels_lines)
+                self._compare_queue.put((job_id, mode, labels, diff_results, None))
+            except Exception as exc:
+                msg = str(exc) or exc.__class__.__name__
+                self._compare_queue.put((job_id, "error", labels, [], msg))
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.after(50, lambda: self._poll_compare_queue(job_id))
+
+    def _poll_compare_queue(self, job_id: int) -> None:
+        if job_id != self._compare_job_id:
+            return
+        try:
+            while True:
+                result_job_id, mode, labels, diff_results, error = self._compare_queue.get_nowait()
+                if result_job_id == self._compare_job_id:
+                    self._start_render_compare(result_job_id, mode, labels, diff_results, error)
+                    return
+        except queue.Empty:
+            pass
+        self.after(50, lambda: self._poll_compare_queue(job_id))
+
+    def _start_render_compare(
+        self,
+        job_id: int,
+        mode: str,
+        labels: list[str],
+        diff_results: list[list[tuple]],
+        error: str | None,
+    ) -> None:
+        if job_id != self._compare_job_id:
+            return
+        if error:
+            self._rendering = False
+            if self.compare_btn:
+                self.compare_btn.config(state="normal", text="⇄ So sánh")
+            self.result_lbl.config(text=f"  Compare failed: {error}", fg=RED_C)
+            for panel in self._panels:
+                dw = panel["diff_tw"]
+                dw.config(state="normal")
+                dw.delete("1.0", "end")
+                dw.insert("end", error, "changed")
+                dw.config(state="disabled")
+                panel["diff_badge"].config(text="  lỗi", fg=RED_C)
+            return
 
         for pi, panel in enumerate(self._panels):
             dw = panel["diff_tw"]
             dw.config(state="normal")
             dw.delete("1.0", "end")
-
-            if pi >= len(diff_results):
-                dw.config(state="disabled")
-                continue
-
-            panel_diff = diff_results[pi]
-            diff_count = sum(1 for _, tag in panel_diff if tag != "same")
-
-            for ln, (text, tag) in enumerate(panel_diff, 1):
-                dw.insert("end", f"{ln:>3}  ", "linenum")
-                dw.insert("end", (text or "·" * 30) + "\n", tag)
-
             dw.config(state="disabled")
+            panel["diff_badge"].config(text="  rendering...", fg=TEXT_DIM)
+
+        same = sum(1 for _, tag in (diff_results[0] if diff_results else []) if tag == "same")
+        total = len(diff_results[0]) if diff_results else 0
+        self.result_lbl.config(
+            text=f"  Mode: {mode}  ·  {len(labels)} panels  ·  {total} dòng  ·  "
+                 f"{same} giống  ·  {total - same} khác  ·  đang render theo batch...",
+            fg=TEXT_DIM,
+        )
+        self._render_compare_panel(job_id, mode, labels, diff_results, 0, 0)
+
+    def _render_compare_panel(
+        self,
+        job_id: int,
+        mode: str,
+        labels: list[str],
+        diff_results: list[list[tuple]],
+        panel_idx: int,
+        row_idx: int,
+    ) -> None:
+        if job_id != self._compare_job_id:
+            return
+        if panel_idx >= len(self._panels) or panel_idx >= len(diff_results):
+            self._finish_render_compare(job_id, mode, labels, diff_results)
+            return
+
+        panel = self._panels[panel_idx]
+        panel_diff = diff_results[panel_idx]
+        dw = panel["diff_tw"]
+        end = min(row_idx + self.RENDER_BATCH_ROWS, len(panel_diff))
+        dw.config(state="normal")
+        for ln in range(row_idx, end):
+            text, tag = panel_diff[ln]
+            dw.insert("end", f"{ln + 1:>6}  ", "linenum")
+            dw.insert("end", (text or "·" * 30) + "\n", tag)
+        dw.config(state="disabled")
+
+        rendered = end
+        total = len(panel_diff)
+        panel["diff_badge"].config(text=f"  render {rendered}/{total}", fg=TEXT_DIM)
+        self.result_lbl.config(
+            text=f"  Mode: {mode}  ·  rendering panel {panel_idx + 1}/{len(self._panels)} "
+                 f"({rendered}/{total} rows)...",
+            fg=TEXT_DIM,
+        )
+
+        if end < total:
+            self.after(1, lambda: self._render_compare_panel(
+                job_id, mode, labels, diff_results, panel_idx, end
+            ))
+        else:
+            diff_count = sum(1 for _, tag in panel_diff if tag != "same")
             panel["diff_badge"].config(
                 text=f"  {diff_count} khác biệt" if diff_count else "  ✓ Giống",
                 fg=YELLOW_C if diff_count else GREEN,
             )
+            self.after(1, lambda: self._render_compare_panel(
+                job_id, mode, labels, diff_results, panel_idx + 1, 0
+            ))
 
-        same  = sum(1 for _, tag in (diff_results[0] if diff_results else []) if tag == "same")
+    def _finish_render_compare(
+        self,
+        job_id: int,
+        mode: str,
+        labels: list[str],
+        diff_results: list[list[tuple]],
+    ) -> None:
+        if job_id != self._compare_job_id:
+            return
+        self._rendering = False
+        if self.compare_btn:
+            self.compare_btn.config(state="normal", text="⇄ So sánh")
+        same = sum(1 for _, tag in (diff_results[0] if diff_results else []) if tag == "same")
         total = len(diff_results[0]) if diff_results else 0
         self.result_lbl.config(
-            text=f"  {len(self._panels)} panels  ·  {total} dòng  ·  "
-                 f"{same} giống  ·  {total - same} khác"
+            text=f"  Mode: {mode}  ·  {len(labels)} panels  ·  {total} dòng  ·  "
+                 f"{same} giống  ·  {total - same} khác  ·  full input, no character limit",
+            fg=TEXT_DIM,
         )
 
     # ── Helpers ───────────────────────────────

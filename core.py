@@ -6,12 +6,17 @@ import re
 import json
 import shlex
 import time
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
 from typing import Any
 
 try:
     import requests
 except ImportError:
-    import subprocess, sys
     subprocess.check_call([sys.executable, "-m", "pip", "install", "requests"])
     import requests  # type: ignore
 
@@ -36,10 +41,162 @@ AI_ANALYSIS_BODY_LIMIT = 12_000
 AI_ANALYSIS_REQUEST_BODY_LIMIT = 4_000
 OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434"
 OLLAMA_FALLBACK_MODELS = ("llama3.2", "llama3.1", "gemma3", "mistral", "qwen2.5")
+OLLAMA_DEFAULT_MODEL = OLLAMA_FALLBACK_MODELS[0]
+OLLAMA_DOWNLOAD_URL = "https://ollama.com/download"
 SENSITIVE_KEY_RE = re.compile(
     r"(authorization|cookie|set-cookie|token|secret|password|passwd|api[-_ ]?key|x-api-key|access[_-]?token|refresh[_-]?token|jwt)",
     re.I,
 )
+
+
+def is_local_ollama_url(base_url: str = OLLAMA_DEFAULT_BASE_URL) -> bool:
+    host = (urlparse(base_url).hostname or "").lower()
+    return host in ("", "localhost", "127.0.0.1", "::1")
+
+
+def find_ollama_executable() -> str:
+    """Find the Ollama CLI even when PATH was not refreshed after install."""
+    for name in ("ollama.exe", "ollama"):
+        found = shutil.which(name)
+        if found:
+            return found
+
+    candidates: list[Path] = []
+    if os.name == "nt":
+        local = os.environ.get("LOCALAPPDATA")
+        program_files = os.environ.get("ProgramFiles")
+        program_files_x86 = os.environ.get("ProgramFiles(x86)")
+        for base in (local, program_files, program_files_x86):
+            if not base:
+                continue
+            candidates.extend([
+                Path(base) / "Programs" / "Ollama" / "ollama.exe",
+                Path(base) / "Ollama" / "ollama.exe",
+            ])
+    else:
+        candidates.extend([
+            Path("/usr/local/bin/ollama"),
+            Path("/usr/bin/ollama"),
+            Path("/opt/homebrew/bin/ollama"),
+        ])
+
+    for path in candidates:
+        if path.exists():
+            return str(path)
+    return ""
+
+
+def ollama_install_command() -> list[str]:
+    """Return the official command used by the setup popup to install Ollama."""
+    if os.name == "nt":
+        return [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "irm https://ollama.com/install.ps1 | iex",
+        ]
+    return ["/bin/sh", "-lc", "curl -fsSL https://ollama.com/install.sh | sh"]
+
+
+def ollama_start_command() -> list[str]:
+    exe = find_ollama_executable()
+    if not exe:
+        raise RuntimeError("Ollama CLI chưa được cài hoặc chưa tìm thấy trong PATH.")
+    return [exe, "serve"]
+
+
+def ollama_pull_command(model: str = OLLAMA_DEFAULT_MODEL) -> list[str]:
+    exe = find_ollama_executable()
+    if not exe:
+        raise RuntimeError("Ollama CLI chưa được cài hoặc chưa tìm thấy trong PATH.")
+    return [exe, "pull", model or OLLAMA_DEFAULT_MODEL]
+
+
+def _match_ollama_model(model: str, installed_models: list[str]) -> str:
+    if not model:
+        return ""
+    for installed in installed_models:
+        if installed == model or installed.startswith(model + ":"):
+            return installed
+    return ""
+
+
+def get_ollama_status(
+    preferred_model: str = "",
+    base_url: str = OLLAMA_DEFAULT_BASE_URL,
+    timeout: float = 2.5,
+) -> dict[str, Any]:
+    """Return install/server/model readiness for the Ollama setup UI."""
+    base = base_url.rstrip("/")
+    local_endpoint = is_local_ollama_url(base)
+    cli_path = find_ollama_executable()
+    models: list[str] = []
+    api_error = ""
+    api_running = False
+    target_model = preferred_model or OLLAMA_DEFAULT_MODEL
+    selected_model = ""
+
+    try:
+        r = requests.get(f"{base}/api/tags", timeout=timeout)
+        r.raise_for_status()
+        data = r.json()
+        api_running = True
+        for item in data.get("models", []) if isinstance(data, dict) else []:
+            name = item.get("name") if isinstance(item, dict) else None
+            if name:
+                models.append(str(name))
+    except Exception as exc:
+        api_error = str(exc) or exc.__class__.__name__
+
+    if api_running:
+        if preferred_model:
+            selected_model = _match_ollama_model(preferred_model, models)
+        elif models:
+            selected_model = _match_ollama_model(OLLAMA_DEFAULT_MODEL, models)
+            if not selected_model:
+                for candidate in OLLAMA_FALLBACK_MODELS:
+                    selected_model = _match_ollama_model(candidate, models)
+                    if selected_model:
+                        break
+            if not selected_model:
+                selected_model = models[0]
+
+    needs_install = local_endpoint and not cli_path
+    needs_start = local_endpoint and bool(cli_path) and not api_running
+    needs_model = api_running and not selected_model
+    ready = api_running and bool(selected_model) and not needs_install
+
+    if ready:
+        message = f"Ollama ready ({selected_model})."
+    elif needs_install:
+        message = "Chưa tìm thấy Ollama trên máy local."
+    elif needs_start:
+        message = "Ollama đã cài nhưng server local chưa chạy."
+    elif needs_model:
+        message = f"Chưa có model `{target_model}` trong Ollama."
+    elif not api_running:
+        message = "Không kết nối được Ollama API."
+    else:
+        message = "Ollama chưa sẵn sàng."
+
+    return {
+        "ready": ready,
+        "message": message,
+        "base_url": base,
+        "local_endpoint": local_endpoint,
+        "cli_path": cli_path,
+        "installed": bool(cli_path) or not local_endpoint,
+        "api_running": api_running,
+        "api_error": api_error,
+        "models": models,
+        "target_model": target_model,
+        "selected_model": selected_model,
+        "needs_install": needs_install,
+        "needs_start": needs_start,
+        "needs_model": needs_model,
+    }
 
 
 def redact_sensitive_text(text: str) -> str:
@@ -214,8 +371,9 @@ def list_ollama_models(base_url: str = OLLAMA_DEFAULT_BASE_URL) -> list[str]:
 def choose_ollama_model(preferred_model: str = "", base_url: str = OLLAMA_DEFAULT_BASE_URL) -> str:
     models = list_ollama_models(base_url)
     if preferred_model:
-        if preferred_model in models:
-            return preferred_model
+        matched = _match_ollama_model(preferred_model, models)
+        if matched:
+            return matched
         raise RuntimeError(
             f"Ollama model `{preferred_model}` is not installed. Run `ollama pull {preferred_model}`."
         )

@@ -7,6 +7,7 @@ import re
 import uuid
 import json
 import os
+import shlex
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -29,10 +30,13 @@ from core import (
     parse_curl, execute_request,
     decode_response, beautify_curl_body,
     build_ai_response_context, analyze_response_with_ai,
-    analyze_response_with_ollama, OLLAMA_DEFAULT_BASE_URL,
+    analyze_response_with_ollama, get_ollama_status,
+    OLLAMA_DEFAULT_BASE_URL,
 )
 import store
 from ui_compare import CurlCompareWindow
+from ui_converter import ConverterWindow
+from ui_ollama_setup import OllamaSetupWindow
 from ui_scenario import ScenarioWindow
 
 
@@ -78,6 +82,8 @@ class CurlRunnerApp(tk.Tk):
         self.rtab_log:     tk.Button = None  # type: ignore
         self.rtab_ai:      tk.Button = None  # type: ignore
         self.ai_analyze_btn: tk.Button = None  # type: ignore
+        self.ai_status_lbl: tk.Label = None  # type: ignore
+        self.ollama_setup_win: tk.Toplevel = None  # type: ignore
         self.openai_api_key = ""
         default_ai_provider = os.environ.get("AI_PROVIDER", "ollama").strip().lower()
         if default_ai_provider not in ("ollama", "openai"):
@@ -100,6 +106,7 @@ class CurlRunnerApp(tk.Tk):
         self._refresh_history_list()
         self._refresh_collection_tree()
         self._refresh_env_selector()
+        self.after(600, self._refresh_ollama_status_async)
 
     # ── FONTS ─────────────────────────────────
     def _setup_fonts(self):
@@ -145,6 +152,7 @@ class CurlRunnerApp(tk.Tk):
         self._mkbtn(ef, "⚙ Manage",  self._open_env_editor,  side="left", pad=(4,0))
         self._mkbtn(ef, "▶ Scenario", self._open_scenario,    side="left", pad=(10,0))
         self._mkbtn(ef, "⇄ Compare", self._open_compare,     side="left", pad=(10,0))
+        self._mkbtn(ef, "⇆ Convert", self._open_converter,   side="left", pad=(10,0))
         self._mkbtn(ef, "🔤 Font",   self._open_font_settings, side="left", pad=(10,0))
 
         # 3-column layout
@@ -584,6 +592,7 @@ class CurlRunnerApp(tk.Tk):
         tb = tk.Frame(frame, bg=BG)
         tb.pack(fill="x", pady=(0,4))
         self._mkbtn(tb, "📂 Import",      lambda t=tab: self._import_file(t),           side="left")
+        self._mkbtn(tb, "↘ Parse",       lambda t=tab: self._parse_curl_to_builder(t, switch=True, force=True, show_status=True), side="left", pad=(6,0))
         self._mkbtn(tb, "✨ Beautify",    lambda t=tab: self._beautify_body(t),          side="left", pad=(6,0))
         self._mkbtn(tb, "✂ Xóa",         lambda t=tab: self._clear_input(t),            side="left", pad=(6,0))
         self._mkbtn(tb, "➕ Collection",  lambda t=tab: self._save_tab_to_coll(t),       side="left", pad=(6,0))
@@ -591,6 +600,107 @@ class CurlRunnerApp(tk.Tk):
         # Notebook: Curl input | Pre-request Script
         nb = ttk.Notebook(frame)
         nb.pack(fill="both", expand=True)
+
+        # ── Request builder tab
+        request_frame = tk.Frame(nb, bg=BG2)
+        nb.add(request_frame, text="  Request  ")
+        tab._request_frame = request_frame
+
+        req_top = tk.Frame(request_frame, bg=BG2)
+        req_top.pack(fill="x", padx=8, pady=(8, 6))
+        tab._method_var = tk.StringVar(value=tab.builder_method or "GET")
+        method_cb = ttk.Combobox(
+            req_top, textvariable=tab._method_var,
+            values=("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"),
+            state="readonly", width=9, font=self.fn_label,
+        )
+        method_cb.pack(side="left")
+        tab._url_var = tk.StringVar(value=tab.builder_url)
+        url_entry = tk.Entry(
+            req_top, textvariable=tab._url_var,
+            font=self.fn_label, bg=BG3, fg=TEXT, insertbackground=ACCENT,
+            relief="flat", bd=0,
+        )
+        url_entry.pack(side="left", fill="x", expand=True, padx=(8, 0), ipady=5)
+
+        req_nb = ttk.Notebook(request_frame)
+        req_nb.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        headers_frame = tk.Frame(req_nb, bg=BG2)
+        req_nb.add(headers_frame, text="  Headers  ")
+        headers_wrap = tk.Frame(headers_frame, bg=BORDER)
+        headers_wrap.pack(fill="both", expand=True, padx=1, pady=1)
+        headers_tree = ttk.Treeview(
+            headers_wrap, columns=("key", "value"), show="headings",
+            selectmode="browse", height=7,
+        )
+        headers_tree.heading("key", text="Header")
+        headers_tree.heading("value", text="Value")
+        headers_tree.column("key", width=180, anchor="w", stretch=False)
+        headers_tree.column("value", width=360, anchor="w", stretch=True)
+        headers_sb_y = tk.Scrollbar(headers_wrap, command=headers_tree.yview,
+                                    bg=BG3, troughcolor=BG2, bd=0)
+        headers_tree.configure(yscrollcommand=headers_sb_y.set)
+        headers_sb_y.pack(side="right", fill="y")
+        headers_tree.pack(fill="both", expand=True, padx=1, pady=1)
+        tab._headers_tree = headers_tree
+
+        header_edit = tk.Frame(headers_frame, bg=BG2)
+        header_edit.pack(fill="x", padx=1, pady=(7, 1))
+        tab._header_key_var = tk.StringVar()
+        tab._header_value_var = tk.StringVar()
+        tk.Label(header_edit, text="Header", font=self.fn_small,
+                 bg=BG2, fg=TEXT_DIM).pack(side="left", padx=(0, 5))
+        key_entry = tk.Entry(
+            header_edit, textvariable=tab._header_key_var,
+            font=self.fn_label, bg=BG3, fg=TEXT, insertbackground=ACCENT,
+            relief="flat", bd=0, width=22,
+        )
+        key_entry.pack(side="left", ipady=4)
+        tk.Label(header_edit, text="Value", font=self.fn_small,
+                 bg=BG2, fg=TEXT_DIM).pack(side="left", padx=(10, 5))
+        value_entry = tk.Entry(
+            header_edit, textvariable=tab._header_value_var,
+            font=self.fn_label, bg=BG3, fg=TEXT, insertbackground=ACCENT,
+            relief="flat", bd=0,
+        )
+        value_entry.pack(side="left", fill="x", expand=True, ipady=4)
+        self._mkbtn(header_edit, "Add/Update", lambda t=tab: self._add_update_header_row(t),
+                    side="left", pad=(8, 0))
+        self._mkbtn(header_edit, "Delete", lambda t=tab: self._delete_header_row(t),
+                    side="left", pad=(6, 0))
+        self._mkbtn(header_edit, "Clear", lambda t=tab: self._clear_header_rows(t),
+                    side="left", pad=(6, 0))
+        headers_tree.bind("<<TreeviewSelect>>", lambda _e, t=tab: self._load_selected_header_row(t))
+        key_entry.bind("<Return>", lambda _e, t=tab: self._add_update_header_row(t))
+        value_entry.bind("<Return>", lambda _e, t=tab: self._add_update_header_row(t))
+        self._set_header_rows(tab, self._parse_headers_text(tab.builder_headers), dirty=False)
+
+        body_frame = tk.Frame(req_nb, bg=BG2)
+        req_nb.add(body_frame, text="  Body  ")
+        body_wrap = tk.Frame(body_frame, bg=BORDER)
+        body_wrap.pack(fill="both", expand=True, padx=1, pady=1)
+        body_tw = tk.Text(
+            body_wrap, bg=CODE_BG, fg=TEXT, insertbackground=ACCENT,
+            font=self.fn_mono, wrap="none", relief="flat",
+            padx=10, pady=8, selectbackground=ACCENT,
+            selectforeground=ACTIVE_TEXT, undo=True, bd=0,
+        )
+        body_sb_y = tk.Scrollbar(body_wrap, command=body_tw.yview,
+                                 bg=BG3, troughcolor=BG2, bd=0)
+        body_sb_x = tk.Scrollbar(body_wrap, orient="horizontal", command=body_tw.xview,
+                                 bg=BG3, troughcolor=BG2, bd=0)
+        body_tw.configure(yscrollcommand=body_sb_y.set, xscrollcommand=body_sb_x.set)
+        body_sb_y.pack(side="right", fill="y")
+        body_sb_x.pack(side="bottom", fill="x")
+        body_tw.pack(fill="both", expand=True)
+        body_tw.insert("1.0", tab.builder_body)
+        tab._body_builder_tw = body_tw
+
+        tab._method_var.trace_add("write", lambda *_args, t=tab: self._mark_builder_dirty(t))
+        tab._url_var.trace_add("write", lambda *_args, t=tab: self._mark_builder_dirty(t))
+        body_tw.bind("<KeyRelease>", lambda _e, t=tab: self._mark_builder_dirty(t))
+        body_tw.bind("<<Paste>>", lambda _e, t=tab: self.after(80, lambda: self._mark_builder_dirty(t)))
 
         # ── Curl tab
         curl_frame = tk.Frame(nb, bg=BG2)
@@ -615,7 +725,8 @@ class CurlRunnerApp(tk.Tk):
             self._set_ph(curl_tw, tab)
         curl_tw.bind("<FocusIn>",    lambda e, t=tab: self._clear_ph(t))
         curl_tw.bind("<FocusOut>",   lambda e, t=tab: self._restore_ph(t))
-        curl_tw.bind("<KeyRelease>", lambda e, t=tab: self._update_env_hint(t))
+        curl_tw.bind("<KeyRelease>", lambda e, t=tab: (self._update_env_hint(t), self._schedule_curl_parse(t)))
+        curl_tw.bind("<<Paste>>", lambda e, t=tab: self.after(100, lambda: self._parse_curl_to_builder(t, switch=True, force=True, show_status=True)))
 
         # ── Pre-request script tab
         pre_frame = tk.Frame(nb, bg=BG2)
@@ -662,6 +773,10 @@ class CurlRunnerApp(tk.Tk):
                   foreground=[("selected", ACTIVE_TEXT)])
 
         tab._nb = nb
+        if tab.curl:
+            self._parse_curl_to_builder(tab, switch=True, force=True, show_status=False)
+        elif not tab.builder_dirty:
+            nb.select(curl_frame)
 
         # ── Options
         opt = tk.Frame(frame, bg=BG)
@@ -774,6 +889,8 @@ class CurlRunnerApp(tk.Tk):
         if not hasattr(tab, "_curl_tw"): return
         curl = tab._curl_tw.get("1.0","end").strip()
         tab.curl = "" if getattr(tab,"_ph_active",False) else curl
+        self._save_builder_state(tab)
+        tab.builder_dirty = getattr(tab, "_builder_dirty", False)
         if hasattr(tab, "_pre_tw"):
             tab.pre_script = tab._pre_tw.get("1.0","end").strip()
 
@@ -817,6 +934,303 @@ class CurlRunnerApp(tk.Tk):
         if not tab._curl_tw.get("1.0","end").strip():
             self._set_ph(tab._curl_tw, tab)
 
+    def _mark_builder_dirty(self, tab) -> None:
+        if getattr(tab, "_syncing_builder", False):
+            return
+        tab._builder_dirty = True
+        tab.builder_dirty = True
+        self._save_builder_state(tab)
+        self._update_env_hint(tab)
+
+    def _save_builder_state(self, tab) -> None:
+        if not hasattr(tab, "_method_var") or tab._method_var is None:
+            return
+        tab.builder_method = tab._method_var.get().strip().upper() or "GET"
+        tab.builder_url = tab._url_var.get().strip() if tab._url_var else ""
+        tab.builder_headers = self._headers_editor_to_text(tab)
+        tab.builder_body = (
+            tab._body_builder_tw.get("1.0", "end-1c") if tab._body_builder_tw else ""
+        )
+
+    def _parse_headers_text(self, text: str) -> list[tuple[str, str]]:
+        rows: list[tuple[str, str]] = []
+        for line in (text or "").splitlines():
+            raw = line.strip()
+            if not raw or raw.startswith("#"):
+                continue
+            if ":" in raw:
+                key, _, value = raw.partition(":")
+                rows.append((key.strip(), value.strip()))
+            else:
+                rows.append((raw, ""))
+        return [(key, value) for key, value in rows if key]
+
+    def _header_rows_from_tree(self, tab) -> list[tuple[str, str]]:
+        tree = getattr(tab, "_headers_tree", None)
+        if not tree:
+            return self._parse_headers_text(getattr(tab, "builder_headers", ""))
+        rows: list[tuple[str, str]] = []
+        for item_id in tree.get_children():
+            values = tree.item(item_id, "values")
+            key = str(values[0]).strip() if values else ""
+            value = str(values[1]).strip() if len(values) > 1 else ""
+            if key:
+                rows.append((key, value))
+        return rows
+
+    def _headers_editor_to_text(self, tab) -> str:
+        return "\n".join(f"{key}: {value}" for key, value in self._header_rows_from_tree(tab))
+
+    def _set_header_rows(self, tab, rows, dirty: bool = False) -> None:
+        tree = getattr(tab, "_headers_tree", None)
+        if not tree:
+            tab.builder_headers = "\n".join(f"{key}: {value}" for key, value in rows)
+            return
+        tab._syncing_builder = True
+        try:
+            tree.delete(*tree.get_children())
+            if isinstance(rows, dict):
+                iterable = rows.items()
+            else:
+                iterable = rows or []
+            for key, value in iterable:
+                key = str(key).strip()
+                if key:
+                    tree.insert("", "end", values=(key, str(value).strip()))
+            if getattr(tab, "_header_key_var", None):
+                tab._header_key_var.set("")
+            if getattr(tab, "_header_value_var", None):
+                tab._header_value_var.set("")
+        finally:
+            tab._syncing_builder = False
+        tab._builder_dirty = dirty
+        tab.builder_dirty = dirty
+        tab.builder_headers = self._headers_editor_to_text(tab)
+
+    def _load_selected_header_row(self, tab) -> None:
+        tree = getattr(tab, "_headers_tree", None)
+        if not tree:
+            return
+        selected = tree.selection()
+        if not selected:
+            return
+        values = tree.item(selected[0], "values")
+        tab._header_key_var.set(str(values[0]) if values else "")
+        tab._header_value_var.set(str(values[1]) if len(values) > 1 else "")
+
+    def _add_update_header_row(self, tab) -> str:
+        tree = getattr(tab, "_headers_tree", None)
+        if not tree:
+            return "break"
+        key = tab._header_key_var.get().strip()
+        value = tab._header_value_var.get().strip()
+        if not key:
+            tab._status_lbl.config(text="Header cần có tên.", fg=RED_C)
+            return "break"
+        selected = tree.selection()
+        target = selected[0] if selected else None
+        if target is None:
+            for item_id in tree.get_children():
+                values = tree.item(item_id, "values")
+                if values and str(values[0]).lower() == key.lower():
+                    target = item_id
+                    break
+        if target:
+            tree.item(target, values=(key, value))
+            tree.selection_set(target)
+        else:
+            target = tree.insert("", "end", values=(key, value))
+            tree.selection_set(target)
+            tree.see(target)
+        tab._header_key_var.set("")
+        tab._header_value_var.set("")
+        tab._builder_dirty = True
+        tab.builder_dirty = True
+        self._save_builder_state(tab)
+        self._update_env_hint(tab)
+        tab._status_lbl.config(text="Header đã cập nhật.", fg=GREEN)
+        return "break"
+
+    def _delete_header_row(self, tab) -> None:
+        tree = getattr(tab, "_headers_tree", None)
+        if not tree:
+            return
+        selected = tree.selection()
+        for item_id in selected:
+            tree.delete(item_id)
+        if selected:
+            tab._builder_dirty = True
+            tab.builder_dirty = True
+            self._save_builder_state(tab)
+            self._update_env_hint(tab)
+            tab._status_lbl.config(text="Header đã xoá.", fg=TEXT_DIM)
+
+    def _clear_header_rows(self, tab) -> None:
+        tree = getattr(tab, "_headers_tree", None)
+        if not tree:
+            return
+        tree.delete(*tree.get_children())
+        tab._header_key_var.set("")
+        tab._header_value_var.set("")
+        tab._builder_dirty = True
+        tab.builder_dirty = True
+        self._save_builder_state(tab)
+        self._update_env_hint(tab)
+        tab._status_lbl.config(text="Headers đã xoá.", fg=TEXT_DIM)
+
+    def _schedule_curl_parse(self, tab) -> None:
+        if getattr(tab, "_builder_dirty", False):
+            return
+        after_id = getattr(tab, "_parse_after", None)
+        if after_id:
+            try:
+                self.after_cancel(after_id)
+            except Exception:
+                pass
+        tab._parse_after = self.after(
+            650,
+            lambda t=tab: self._parse_curl_to_builder(t, switch=False, force=False, show_status=False),
+        )
+
+    def _parse_curl_to_builder(
+        self,
+        tab,
+        switch: bool = False,
+        force: bool = False,
+        show_status: bool = False,
+    ) -> bool:
+        if not hasattr(tab, "_curl_tw") or not hasattr(tab, "_method_var"):
+            return False
+        if getattr(tab, "_builder_dirty", False) and not force:
+            return False
+
+        raw = tab._curl_tw.get("1.0", "end").strip()
+        if not raw or getattr(tab, "_ph_active", False):
+            return False
+        if not raw.lower().lstrip().startswith("curl"):
+            if show_status:
+                tab._status_lbl.config(text="Input không bắt đầu bằng curl.", fg=TEXT_DIM)
+            return False
+
+        try:
+            parsed = parse_curl(raw)
+        except Exception as exc:
+            if show_status:
+                tab._status_lbl.config(text=f"Không parse được curl: {str(exc)[:90]}", fg=RED_C)
+            return False
+
+        self._fill_request_builder(tab, parsed, dirty=False)
+        if switch and getattr(tab, "_request_frame", None):
+            tab._nb.select(tab._request_frame)
+        if show_status:
+            tab._status_lbl.config(text="↘ Đã tách curl thành Method / URL / Headers / Body", fg=GREEN)
+        self._update_env_hint(tab)
+        return True
+
+    def _fill_request_builder(self, tab, parsed: dict, dirty: bool = False) -> None:
+        tab._syncing_builder = True
+        try:
+            if tab._method_var:
+                tab._method_var.set(str(parsed.get("method") or "GET").upper())
+            if tab._url_var:
+                tab._url_var.set(str(parsed.get("url") or ""))
+            self._set_header_rows(tab, (parsed.get("headers") or {}).items(), dirty=False)
+            if tab._body_builder_tw:
+                tab._body_builder_tw.delete("1.0", "end")
+                tab._body_builder_tw.insert("1.0", self._body_to_builder_text(parsed.get("body")))
+        finally:
+            tab._syncing_builder = False
+        tab._builder_dirty = dirty
+        tab.builder_dirty = dirty
+        self._save_builder_state(tab)
+
+    def _headers_to_text(self, headers: dict) -> str:
+        return "\n".join(f"{k}: {v}" for k, v in (headers or {}).items())
+
+    def _body_to_builder_text(self, body) -> str:
+        if body is None:
+            return ""
+        if isinstance(body, bytes):
+            return f"[binary body: {len(body):,} bytes]"
+        if isinstance(body, dict):
+            return "\n".join(f"{k}={v}" for k, v in body.items())
+        return str(body)
+
+    def _parse_headers_editor(self, text: str) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        for line in (text or "").splitlines():
+            raw = line.strip()
+            if not raw or raw.startswith("#"):
+                continue
+            if ":" not in raw:
+                raise ValueError(f"Header không hợp lệ, cần dạng `Key: value`: {raw[:80]}")
+            key, _, value = raw.partition(":")
+            key = key.strip()
+            if not key:
+                raise ValueError(f"Header thiếu key: {raw[:80]}")
+            headers[key] = value.strip()
+        return headers
+
+    def _builder_has_request(self, tab) -> bool:
+        if not hasattr(tab, "_url_var") or tab._url_var is None:
+            return False
+        return bool(tab._url_var.get().strip())
+
+    def _build_parsed_from_builder(self, tab, env: dict[str, str]) -> dict:
+        self._save_builder_state(tab)
+        method = (tab.builder_method or "GET").strip().upper()
+        url = apply_env(tab.builder_url, env).strip()
+        if not url:
+            raise ValueError("URL trong Request tab đang trống.")
+        headers_text = apply_env(tab.builder_headers, env)
+        body_text = apply_env(tab.builder_body, env)
+        body = body_text if body_text else None
+        return {
+            "method": method,
+            "url": url,
+            "headers": self._parse_headers_editor(headers_text),
+            "body": body,
+            "auth": None,
+            "verify_ssl": True,
+            "allow_redirects": True,
+            "timeout": 30,
+        }
+
+    def _build_curl_from_builder(self, tab) -> str:
+        self._save_builder_state(tab)
+        method = (tab.builder_method or "GET").strip().upper()
+        url = tab.builder_url.strip()
+        parts = ["curl"]
+        if method != "GET" or tab.builder_body.strip():
+            parts.append(f"-X {method}")
+        if url:
+            parts.append(shlex.quote(url))
+        for key, value in self._parse_headers_editor(tab.builder_headers).items():
+            parts.append(f"-H {shlex.quote(f'{key}: {value}')}")
+        if tab.builder_body.strip():
+            parts.append(f"--data-raw {shlex.quote(tab.builder_body.strip())}")
+        return " \\\n  ".join(parts)
+
+    def _current_raw_curl(self, tab) -> str:
+        if not hasattr(tab, "_curl_tw") or getattr(tab, "_ph_active", False):
+            return ""
+        return tab._curl_tw.get("1.0", "end").strip()
+
+    def _storage_curl_for_tab(self, tab) -> str:
+        raw = self._current_raw_curl(tab)
+        if self._builder_has_request(tab) and (getattr(tab, "_builder_dirty", False) or not raw):
+            return self._build_curl_from_builder(tab)
+        return raw
+
+    def _prepare_request_from_tab(self, tab, env: dict[str, str]) -> tuple[dict, str]:
+        raw = self._current_raw_curl(tab)
+        use_builder = self._builder_has_request(tab) and (getattr(tab, "_builder_dirty", False) or not raw)
+        if use_builder:
+            return self._build_parsed_from_builder(tab, env), self._build_curl_from_builder(tab)
+        if not raw:
+            raise ValueError("Vui lòng nhập curl command hoặc URL trong Request tab.")
+        return parse_curl(apply_env(raw, env)), raw
+
     def _set_curl(self, curl_str):
         """Load curl vào tab đang active."""
         if self.active_tab_idx < 0: return
@@ -826,6 +1240,9 @@ class CurlRunnerApp(tk.Tk):
         tab._curl_tw.delete("1.0","end")
         tab._curl_tw.insert("1.0", curl_str)
         tab.curl = curl_str
+        tab._builder_dirty = False
+        tab.builder_dirty = False
+        self._parse_curl_to_builder(tab, switch=True, force=True, show_status=False)
         self._update_env_hint(tab)
 
     def _update_env_hint(self, tab=None):
@@ -833,7 +1250,16 @@ class CurlRunnerApp(tk.Tk):
             if self.active_tab_idx < 0: return
             tab = self.tabs[self.active_tab_idx]
         if not hasattr(tab,"_curl_tw"): return
-        text  = tab._curl_tw.get("1.0","end")
+        texts = []
+        if not getattr(tab, "_ph_active", False):
+            texts.append(tab._curl_tw.get("1.0","end"))
+        if hasattr(tab, "_url_var") and tab._url_var:
+            texts.append(tab._url_var.get())
+        if hasattr(tab, "_headers_tree") and tab._headers_tree:
+            texts.append(self._headers_editor_to_text(tab))
+        if hasattr(tab, "_body_builder_tw") and tab._body_builder_tw:
+            texts.append(tab._body_builder_tw.get("1.0", "end"))
+        text = "\n".join(texts)
         found = re.findall(r'\{\{(\w+)\}\}', text)
         lbl   = getattr(tab,"_env_hint_lbl", None)
         if not lbl: return
@@ -852,11 +1278,25 @@ class CurlRunnerApp(tk.Tk):
         if not hasattr(tab,"_curl_tw"): return
         self._clear_ph(tab)
         raw = tab._curl_tw.get("1.0","end").strip()
-        if not raw: return
+        if not raw:
+            if hasattr(tab, "_body_builder_tw") and tab._body_builder_tw:
+                body = tab._body_builder_tw.get("1.0", "end").strip()
+                try:
+                    pretty = json.dumps(json.loads(body), indent=2, ensure_ascii=False)
+                except Exception:
+                    return
+                tab._body_builder_tw.delete("1.0", "end")
+                tab._body_builder_tw.insert("1.0", pretty)
+                self._mark_builder_dirty(tab)
+                tab._status_lbl.config(text="✨ Body đã được format", fg=GREEN)
+            return
         result = beautify_curl_body(raw)
         if result != raw:
             tab._curl_tw.delete("1.0","end")
             tab._curl_tw.insert("1.0", result)
+            tab._builder_dirty = False
+            tab.builder_dirty = False
+            self._parse_curl_to_builder(tab, switch=False, force=True, show_status=False)
             tab._status_lbl.config(text="✨ Body đã được format", fg=GREEN)
         else:
             tab._status_lbl.config(text="Body không phải JSON hoặc đã format rồi", fg=TEXT_DIM)
@@ -906,6 +1346,9 @@ class CurlRunnerApp(tk.Tk):
             self._clear_ph(tab)
             tab._curl_tw.delete("1.0","end")
             tab._curl_tw.insert("1.0", "\n".join(out) if out else content)
+            tab._builder_dirty = False
+            tab.builder_dirty = False
+            self._parse_curl_to_builder(tab, switch=True, force=True, show_status=False)
             tab._status_lbl.config(text=f"📂 Đã import: {Path(path).name}", fg=GREEN)
             self._update_env_hint(tab)
         except Exception as e:
@@ -914,6 +1357,23 @@ class CurlRunnerApp(tk.Tk):
     def _clear_input(self, tab):
         if not hasattr(tab,"_curl_tw"): return
         tab._curl_tw.delete("1.0","end")
+        if hasattr(tab, "_method_var") and tab._method_var:
+            tab._syncing_builder = True
+            try:
+                tab._method_var.set("GET")
+                tab._url_var.set("")
+                if getattr(tab, "_headers_tree", None):
+                    tab._headers_tree.delete(*tab._headers_tree.get_children())
+                if getattr(tab, "_header_key_var", None):
+                    tab._header_key_var.set("")
+                if getattr(tab, "_header_value_var", None):
+                    tab._header_value_var.set("")
+                tab._body_builder_tw.delete("1.0", "end")
+            finally:
+                tab._syncing_builder = False
+            tab._builder_dirty = False
+            tab.builder_dirty = False
+            self._save_builder_state(tab)
         self._restore_ph(tab)
         tab._status_lbl.config(text="")
         if hasattr(tab,"_env_hint_lbl"):
@@ -921,9 +1381,12 @@ class CurlRunnerApp(tk.Tk):
 
     def _save_tab_to_coll(self, tab):
         if not hasattr(tab,"_curl_tw"): return
-        curl_str = tab._curl_tw.get("1.0","end").strip()
-        if not curl_str or getattr(tab,"_ph_active",False):
-            messagebox.showwarning("","Hãy nhập curl command trước."); return
+        try:
+            curl_str = self._storage_curl_for_tab(tab)
+        except Exception as exc:
+            messagebox.showwarning("", f"Request chưa hợp lệ:\n{exc}"); return
+        if not curl_str:
+            messagebox.showwarning("","Hãy nhập curl command hoặc URL trong Request tab."); return
         if not self.collections:
             if messagebox.askyesno("Chưa có Collection","Tạo mới?"):
                 self._new_collection()
@@ -945,9 +1408,9 @@ class CurlRunnerApp(tk.Tk):
     def _send(self, tab):
         if not hasattr(tab,"_curl_tw"): return
         self._save_tab_state(tab)
-        curl_str = tab._curl_tw.get("1.0","end").strip()
-        if not curl_str or getattr(tab,"_ph_active",False):
-            messagebox.showwarning("Thiếu input","Vui lòng nhập curl command."); return
+        curl_str = self._current_raw_curl(tab)
+        if not curl_str and not self._builder_has_request(tab):
+            messagebox.showwarning("Thiếu input","Vui lòng nhập curl command hoặc URL trong Request tab."); return
         try:
             repeat_count = self._get_repeat_count(tab)
         except ValueError as e:
@@ -961,7 +1424,15 @@ class CurlRunnerApp(tk.Tk):
             env, pre_logs = run_pre_script(pre_script, env)
             tab.pre_logs = pre_logs
 
-        curl_resolved = apply_env(curl_str, env)
+        try:
+            parsed = None
+            parsed, original_curl = self._prepare_request_from_tab(tab, env)
+            parsed["verify_ssl"]      = tab._var_ssl.get()
+            parsed["allow_redirects"] = tab._var_redirect.get()
+            try:    parsed["timeout"] = float(tab._timeout_var.get())
+            except: parsed["timeout"] = 30
+        except Exception as e:
+            messagebox.showwarning("Request không hợp lệ", str(e)); return
 
         btn_text = "⏳  Đang gửi..." if repeat_count == 1 else f"⏳  Gửi 1/{repeat_count}..."
         tab._send_btn.config(state="disabled", text=btn_text)
@@ -974,11 +1445,6 @@ class CurlRunnerApp(tk.Tk):
 
         def worker():
             try:
-                parsed = parse_curl(curl_resolved)
-                parsed["verify_ssl"]      = tab._var_ssl.get()
-                parsed["allow_redirects"] = tab._var_redirect.get()
-                try:    parsed["timeout"] = float(tab._timeout_var.get())
-                except: parsed["timeout"] = 30
                 repeat_logs = []
                 resp = None
                 elapsed = 0
@@ -998,7 +1464,7 @@ class CurlRunnerApp(tk.Tk):
                     logs.append(f"🔁 Auto call complete: {repeat_count} request(s)")
                     logs.extend(repeat_logs)
                 self.after(0, lambda: self._display(
-                    tab, parsed, resp, elapsed, curl_str, logs, repeat_count
+                    tab, parsed, resp, elapsed, original_curl, logs, repeat_count
                 ))
             except Exception as e:
                 error_msg = str(e) or repr(e) or e.__class__.__name__
@@ -1039,6 +1505,10 @@ class CurlRunnerApp(tk.Tk):
                 activebackground=BG3, activeforeground=TEXT,
                 selectcolor=BG2, bd=0, padx=8,
             ).pack(side="left")
+        self.ai_status_lbl = tk.Label(ai_opts, text="Ollama: checking...",
+                                      font=self.fn_small, bg=BG3,
+                                      fg=TEXT_DIM, anchor="e")
+        self.ai_status_lbl.pack(side="right", padx=(8, 9))
 
         toolbar = tk.Frame(frame, bg=BG)
         toolbar.pack(fill="x", pady=(0,4))
@@ -1503,11 +1973,92 @@ class CurlRunnerApp(tk.Tk):
 
     def _on_ai_provider_change(self) -> None:
         if self.ai_provider_var.get() != "openai":
+            self._refresh_ollama_status_async()
             return
         if self._get_openai_key():
+            if self.ai_status_lbl:
+                self.ai_status_lbl.config(text="OpenAI billing", fg=TEXT_DIM)
             return
         self.ai_provider_var.set("ollama")
+        self._refresh_ollama_status_async()
         messagebox.showinfo("", "Chưa nhập API key. Đã chuyển về Free Local.")
+
+    def _refresh_ollama_status_async(self) -> None:
+        if not self.ai_status_lbl:
+            return
+        if self.ai_provider_var.get() != "ollama":
+            self.ai_status_lbl.config(text="OpenAI billing", fg=TEXT_DIM)
+            return
+        self.ai_status_lbl.config(text="Ollama: checking...", fg=TEXT_DIM)
+        model = os.environ.get("OLLAMA_MODEL", "")
+        base_url = os.environ.get("OLLAMA_BASE_URL", OLLAMA_DEFAULT_BASE_URL)
+
+        def worker() -> None:
+            status = get_ollama_status(model, base_url)
+            self.after(0, lambda status=status: self._set_ollama_status_badge(status))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _set_ollama_status_badge(self, status: dict) -> None:
+        if not self.ai_status_lbl:
+            return
+        if status.get("ready"):
+            text = f"Ollama: ready ({status.get('selected_model')})"
+            color = GREEN
+        elif status.get("needs_install"):
+            text = "Ollama: not installed"
+            color = RED_C
+        elif status.get("needs_start"):
+            text = "Ollama: stopped"
+            color = YELLOW_C
+        elif status.get("needs_model"):
+            text = "Ollama: need model"
+            color = YELLOW_C
+        else:
+            text = "Ollama: not ready"
+            color = RED_C
+        self.ai_status_lbl.config(text=text, fg=color)
+
+    def _format_ollama_setup_message(self, status: dict) -> str:
+        lines = [
+            "Ollama local chưa sẵn sàng cho Free Local AI.",
+            "",
+            f"Trạng thái: {status.get('message', 'Unknown')}",
+            f"Base URL: {status.get('base_url', OLLAMA_DEFAULT_BASE_URL)}",
+            f"Ollama CLI: {status.get('cli_path') or '(chưa tìm thấy)'}",
+            f"Server: {'running' if status.get('api_running') else 'not running'}",
+            f"Model cần dùng: {status.get('target_model') or 'llama3.2'}",
+            "",
+            "Mình đã mở cửa sổ setup để bạn Install / Start / Pull model và xem tiến độ.",
+        ]
+        if status.get("api_error") and not status.get("api_running"):
+            lines.insert(-2, f"API detail: {status.get('api_error')}")
+        return "\n".join(lines)
+
+    def _open_ollama_setup(
+        self,
+        base_url: str,
+        model: str,
+        status: dict | None = None,
+        on_ready=None,
+    ) -> None:
+        if self.ollama_setup_win and self.ollama_setup_win.winfo_exists():
+            self.ollama_setup_win.lift()
+            self.ollama_setup_win.focus_force()
+            return
+
+        def ready_callback() -> None:
+            self._refresh_ollama_status_async()
+            if on_ready:
+                self.after(100, on_ready)
+
+        self.ollama_setup_win = OllamaSetupWindow(
+            self,
+            base_url=base_url,
+            preferred_model=model,
+            initial_status=status,
+            on_ready=ready_callback,
+        )
 
     def _resolve_ai_provider(self) -> tuple[str, str, str]:
         provider = self.ai_provider_var.get().strip().lower()
@@ -1539,6 +2090,20 @@ class CurlRunnerApp(tk.Tk):
             self._show_resp_tab("ai")
             self._write_ai_analysis(f"AI analysis failed:\n{e}", "err")
             return
+
+        if provider == "ollama":
+            status = get_ollama_status(model, credential)
+            self._set_ollama_status_badge(status)
+            if not status.get("ready"):
+                self._show_resp_tab("ai")
+                self._write_ai_analysis(self._format_ollama_setup_message(status), "err")
+                self._open_ollama_setup(
+                    base_url=credential,
+                    model=status.get("target_model") or model,
+                    status=status,
+                    on_ready=self._analyze_response,
+                )
+                return
 
         context = build_ai_response_context(
             tab.parsed or {}, tab.response, tab.body_text, tab.detected_enc
@@ -1641,6 +2206,16 @@ class CurlRunnerApp(tk.Tk):
         while len(open_curls) < 2:
             open_curls.append("")
         CurlCompareWindow(self, initial_curls=open_curls)
+
+    def _open_converter(self):
+        """Mở popup convert String / JSON."""
+        seed = ""
+        if self.active_tab_idx >= 0:
+            tab = self.tabs[self.active_tab_idx]
+            seed = getattr(tab, "body_text", "") or ""
+            if not seed and hasattr(tab, "_body_builder_tw") and tab._body_builder_tw:
+                seed = tab._body_builder_tw.get("1.0", "end-1c")
+        ConverterWindow(self, initial_text=seed)
 
     def _open_scenario(self):
         """Mở API Scenario runner."""

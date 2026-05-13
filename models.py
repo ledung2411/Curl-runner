@@ -13,6 +13,11 @@ class RequestTab:
         self.name       = name or f"Tab {RequestTab._counter}"
         self.curl       = curl
         self.pre_script = pre_script
+        self.builder_method = "GET"
+        self.builder_url = ""
+        self.builder_headers = ""
+        self.builder_body = ""
+        self.builder_dirty = False
 
         # Response state — được set sau khi gửi request
         self.response     = None   # requests.Response
@@ -27,6 +32,13 @@ class RequestTab:
         self._frame       = None   # tk.Frame
         self._curl_tw     = None   # tk.Text
         self._pre_tw      = None   # tk.Text
+        self._request_frame = None # tk.Frame
+        self._method_var  = None   # tk.StringVar
+        self._url_var     = None   # tk.StringVar
+        self._headers_tree = None  # ttk.Treeview
+        self._header_key_var = None # tk.StringVar
+        self._header_value_var = None # tk.StringVar
+        self._body_builder_tw = None # tk.Text
         self._send_btn    = None   # tk.Button
         self._status_lbl  = None   # tk.Label
         self._env_hint_lbl= None   # tk.Label
@@ -37,3 +49,6 @@ class RequestTab:
         self._timeout_var = None   # tk.StringVar
         self._repeat_var  = None   # tk.StringVar
         self._ph_active   = False  # placeholder active flag
+        self._builder_dirty = False
+        self._syncing_builder = False
+        self._parse_after = None
