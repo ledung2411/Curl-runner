@@ -19,6 +19,7 @@ from constants import (
 )
 from core import apply_env, parse_curl, execute_request, decode_response
 import store
+from ui_theme import apply_modern_theme
 
 if TYPE_CHECKING:
     from app import CurlRunnerApp
@@ -34,6 +35,7 @@ class ScenarioWindow(tk.Toplevel):
         self.geometry("1320x820")
         self.minsize(980, 620)
         self.configure(bg=BG)
+        apply_modern_theme(self)
 
         self.scenarios: list[dict] = store.load_scenarios()
         self.active_idx = 0
@@ -129,14 +131,10 @@ class ScenarioWindow(tk.Toplevel):
         tree_wrap = tk.Frame(right, bg=BORDER)
         tree_wrap.pack(fill="both", expand=True)
         style = ttk.Style()
-        try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass
         style.configure(
             "Treeview", background=BG2, foreground=TEXT,
             fieldbackground=BG2, font=(FONT_FAMILY, 9),
-            rowheight=29, borderwidth=0,
+            rowheight=30, borderwidth=0,
         )
         style.map(
             "Treeview",

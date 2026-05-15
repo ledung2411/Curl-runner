@@ -38,6 +38,7 @@ from ui_compare import CurlCompareWindow
 from ui_converter import ConverterWindow
 from ui_ollama_setup import OllamaSetupWindow
 from ui_scenario import ScenarioWindow
+from ui_theme import apply_modern_theme
 
 
 class CurlRunnerApp(tk.Tk):
@@ -52,6 +53,7 @@ class CurlRunnerApp(tk.Tk):
         self.geometry("1400x880")
         self.minsize(980, 660)
         self.configure(bg=BG)
+        self.ui_theme_name = apply_modern_theme(self)
 
         self.history      = store.load_history()
         self.collections  = store.load_collections()
@@ -132,18 +134,14 @@ class CurlRunnerApp(tk.Tk):
         brand.pack(side="left", padx=18, pady=8)
         tk.Label(brand, text="Curl Runner", font=self.fn_title,
                  bg=TITLEBAR_BG, fg=TEXT).pack(anchor="w")
-        tk.Label(brand, text="API client · scenarios · AI analysis",
+        theme_label = "ttkbootstrap UI" if self.ui_theme_name.startswith("ttkbootstrap") else "clean UI"
+        tk.Label(brand, text=f"API client · scenarios · AI analysis · {theme_label}",
                  font=self.fn_small, bg=TITLEBAR_BG, fg=TEXT_DIM).pack(anchor="w")
 
         ef = tk.Frame(topbar, bg=TITLEBAR_BG)
         ef.pack(side="right", padx=16)
         tk.Label(ef, text="ENV:", font=self.fn_badge, bg=TITLEBAR_BG, fg=TEXT_DIM).pack(side="left")
         self.env_var = tk.StringVar(value=self.active_env)
-        style = ttk.Style()
-        style.configure("TCombobox",
-                         fieldbackground=BG3, background=BG3,
-                         foreground=TEXT, selectbackground=SURFACE_ACTIVE,
-                         selectforeground=ACTIVE_TEXT, arrowcolor=ACCENT)
         self.env_combo = ttk.Combobox(ef, textvariable=self.env_var, width=16,
                                       state="readonly", font=self.fn_label,
                                       style="TCombobox")
@@ -312,10 +310,9 @@ class CurlRunnerApp(tk.Tk):
                                       yscrollcommand=sb.set)
         sb.config(command=self.coll_tree.yview)
         style = ttk.Style()
-        style.theme_use("default")
         style.configure("Treeview", background=BG2, foreground=TEXT,
                         fieldbackground=BG2, font=(FONT_FAMILY, 9),
-                        rowheight=28, borderwidth=0)
+                        rowheight=30, borderwidth=0)
         style.map("Treeview", background=[("selected", SURFACE_ACTIVE)],
                   foreground=[("selected", ACTIVE_TEXT)])
         self.coll_tree.pack(fill="both", expand=True)
@@ -762,15 +759,6 @@ class CurlRunnerApp(tk.Tk):
         pre_tw.bind("<FocusIn>", lambda e, tw=pre_tw: (
             tw.config(fg=TEXT) if tw.get("1.0","end").strip().startswith("#") else None
         ))
-
-        # Style notebook tabs
-        style = ttk.Style()
-        style.configure("TNotebook", background=BG2, borderwidth=0)
-        style.configure("TNotebook.Tab", background=BG3, foreground=TEXT_DIM,
-                        padding=[12,5], font=(FONT_FAMILY, 9))
-        style.map("TNotebook.Tab",
-                  background=[("selected", SURFACE_ACTIVE)],
-                  foreground=[("selected", ACTIVE_TEXT)])
 
         tab._nb = nb
         if tab.curl:

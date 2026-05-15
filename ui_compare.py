@@ -17,6 +17,7 @@ from constants import (
     GREEN, RED_C, YELLOW_C,
     SURFACE_HOVER, SURFACE_ACTIVE, TITLEBAR_BG, FONT_FAMILY, FONT_FAMILY_MONO,
 )
+from ui_theme import apply_modern_theme
 
 if TYPE_CHECKING:
     from app import CurlRunnerApp
@@ -47,6 +48,7 @@ class CurlCompareWindow(tk.Toplevel):
         self.geometry("1300x780")
         self.minsize(800, 500)
         self.configure(bg=BG)
+        apply_modern_theme(self)
 
         self._panels: list[dict] = []
         self.mode_var = tk.StringVar(value="auto")

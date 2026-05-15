@@ -2,7 +2,7 @@
 
 > Postman trên Desktop — chạy curl command và xem response trực tiếp, không cần cài Postman.
 
-![Python](https://img.shields.io/badge/Python-3.8+-blue?logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Windows-blue?logo=windows)
 ![Version](https://img.shields.io/badge/Version-4.0-orange)
 ![License](https://img.shields.io/badge/License-MIT-green)
@@ -25,6 +25,7 @@ Xem hướng dẫn chi tiết tại [USER_MANUAL.md](USER_MANUAL.md).
 
 | Tính năng | Mô tả |
 |---|---|
+| 🎛 **Modern UI library** | Dùng `ttkbootstrap` để theme Combobox, Notebook, Treeview/table theo giao diện sạch và thân thiện hơn |
 | 📑 **Multi-tab** | Mở nhiều request song song, switch qua lại như browser |
 | 🧱 **Request Builder** | Paste curl rồi tự tách Method / URL / Headers / Body giống Postman |
 | ⚡ **Pre-request Script** | Chạy Python script trước khi gửi — tự động lấy token, set biến |
@@ -50,20 +51,21 @@ Xem hướng dẫn chi tiết tại [USER_MANUAL.md](USER_MANUAL.md).
 ## 🚀 Cài đặt & Chạy
 
 ### Yêu cầu
-- Python 3.8+
+- Python 3.10+
 - pip
+- `ttkbootstrap` cho theme UI hiện đại
 - Ollama nếu muốn dùng AI analysis local miễn phí
 
 ### Cài thư viện Python
 
 ```bash
-pip install requests charset-normalizer
+pip install -r requirements.txt
 ```
 
-Nếu muốn đóng gói `.exe`, cài thêm:
+Nếu muốn đóng gói `.exe`, các dependency trong `requirements.txt` đã bao gồm PyInstaller:
 
 ```bash
-pip install pyinstaller
+pip install -r requirements.txt
 ```
 
 ### Chạy nhanh từ source
@@ -71,7 +73,7 @@ pip install pyinstaller
 ```bash
 git clone https://github.com/ledung2411/Curl-runner.git
 cd Curl-runner
-pip install requests charset-normalizer
+pip install -r requirements.txt
 python main.py
 ```
 
@@ -84,8 +86,8 @@ python main.py
 ### Đóng gói thành `.exe` (không cần Python)
 
 ```bash
-pip install pyinstaller
-python -m PyInstaller --onefile --noconsole --name CurlRunner main.py
+pip install -r requirements.txt
+python -m PyInstaller CurlRunner.spec
 ```
 
 File `.exe` xuất ra tại `dist\CurlRunner.exe` — double-click là chạy.
@@ -520,10 +522,13 @@ Curl-runner/
 ├── models.py            # Tab/request state
 ├── store.py             # History, collections, environments
 ├── constants.py         # Theme, colors, fonts
+├── ui_theme.py          # ttkbootstrap theme integration + Tk fallback
 ├── ui_compare.py        # Compare Curl / JSON / Text popup
 ├── ui_converter.py      # Convert String / JSON popup
+├── ui_ollama_setup.py   # Ollama local AI setup popup
 ├── ui_scenario.py       # API Scenario runner
 ├── ui_widgets.py        # Shared UI widgets
+├── requirements.txt     # Runtime/build dependencies
 ├── CurlRunner.spec      # PyInstaller spec
 └── README.md
 ```
@@ -580,6 +585,7 @@ Thêm vào `.vscode/settings.json` để tắt Pylance warnings với tkinter:
 |---|---|
 | `requests` | Gửi HTTP request |
 | `charset-normalizer` | Auto-detect encoding của response |
+| `ttkbootstrap` | Modern theme layer cho ttk widgets |
 | `pyinstaller` | Đóng gói thành `.exe` (tuỳ chọn) |
 | `tkinter` | GUI (có sẵn trong Python) |
 | Ollama desktop/service | AI analysis local miễn phí (tuỳ chọn, chạy ngoài Python) |

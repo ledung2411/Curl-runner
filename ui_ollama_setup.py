@@ -20,6 +20,7 @@ from core import (
     get_ollama_status, ollama_install_command,
     ollama_pull_command, ollama_start_command,
 )
+from ui_theme import apply_modern_theme
 
 if TYPE_CHECKING:
     from app import CurlRunnerApp
@@ -48,6 +49,7 @@ class OllamaSetupWindow(tk.Toplevel):
         self.geometry("680x560")
         self.minsize(600, 480)
         self.configure(bg=BG)
+        apply_modern_theme(self)
         self.transient(parent)
 
         self._setup_fonts()

@@ -12,6 +12,7 @@ from constants import (
     ACTIVE_TEXT, GREEN, RED_C, TITLEBAR_BG, FONT_FAMILY, FONT_FAMILY_MONO,
     SURFACE_HOVER,
 )
+from ui_theme import apply_modern_theme
 
 if TYPE_CHECKING:
     from app import CurlRunnerApp
@@ -35,6 +36,7 @@ class ConverterWindow(tk.Toplevel):
         self.geometry("1120x720")
         self.minsize(820, 520)
         self.configure(bg=BG)
+        apply_modern_theme(self)
 
         self.mode_var = tk.StringVar(value=self.MODES[0][0])
         self._setup_fonts()

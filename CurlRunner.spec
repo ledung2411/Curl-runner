@@ -1,12 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
+
+ttkbootstrap_datas = collect_data_files('ttkbootstrap')
+ttkbootstrap_hiddenimports = collect_submodules('ttkbootstrap')
+
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
-    hiddenimports=[],
+    datas=ttkbootstrap_datas,
+    hiddenimports=ttkbootstrap_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
