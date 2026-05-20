@@ -40,6 +40,7 @@ class CurlCompareWindow(tk.Toplevel):
     FG_CHANGED = "#946200"
     FG_MISSING = "#8b95a5"
     RENDER_BATCH_ROWS = 250
+    SEARCH_HIGHLIGHT_LIMIT = 5000
 
     def __init__(self, parent: "CurlRunnerApp", initial_curls: list[str] | None = None):
         super().__init__(parent)
@@ -56,6 +57,21 @@ class CurlCompareWindow(tk.Toplevel):
         self._rendering = False
         self._compare_queue: queue.Queue = queue.Queue()
         self.compare_btn: tk.Button | None = None
+        self.search_var = tk.StringVar()
+        self.search_scope_var = tk.StringVar(value="All panels")
+        self.search_case_var = tk.BooleanVar(value=False)
+        self.search_only_var = tk.BooleanVar(value=False)
+        self.search_after: str | None = None
+        self.search_matches: list[tuple[int, str, str]] = []
+        self.search_match_index = -1
+        self.search_match_overflow = False
+        self.search_entry: tk.Entry | None = None
+        self.search_scope_cb: ttk.Combobox | None = None
+        self.search_count_lbl: tk.Label | None = None
+        self._last_mode = ""
+        self._last_labels: list[str] = []
+        self._last_diff_results: list[list[tuple]] = []
+        self._display_filter_key: tuple | None = None
         self._setup_fonts()
         self._build_ui()
 
@@ -99,6 +115,54 @@ class CurlCompareWindow(tk.Toplevel):
         )
         mode_cb.pack(side="left")
         mode_cb.bind("<<ComboboxSelected>>", lambda _e: self._run_compare())
+
+        # Search bar
+        search = tk.Frame(self, bg=BG3)
+        search.pack(fill="x", padx=12, pady=(6, 2))
+        tk.Label(search, text="Search", font=self.fn_label,
+                 bg=BG3, fg=TEXT_DIM).pack(side="left", padx=(8, 5))
+        self.search_var.trace_add("write", self._schedule_compare_search)
+        self.search_entry = tk.Entry(
+            search, textvariable=self.search_var, font=self.fn_monos,
+            bg=BG2, fg=TEXT, insertbackground=ACCENT, relief="flat",
+            bd=0, width=24,
+        )
+        self.search_entry.pack(side="left", fill="x", expand=True, ipady=4)
+        self.search_entry.bind("<Return>", lambda _e: self._goto_compare_match(1))
+        self.search_entry.bind("<Shift-Return>", lambda _e: self._goto_compare_match(-1))
+        self.search_entry.bind("<Escape>", lambda _e: self._clear_compare_search())
+
+        tk.Label(search, text="Scope:", font=self.fn_small,
+                 bg=BG3, fg=TEXT_DIM).pack(side="left", padx=(8, 4))
+        self.search_scope_cb = ttk.Combobox(
+            search, textvariable=self.search_scope_var,
+            values=("All panels",), state="readonly", width=22,
+            font=self.fn_label,
+        )
+        self.search_scope_cb.pack(side="left")
+        self.search_scope_cb.bind("<<ComboboxSelected>>", lambda _e: self._schedule_compare_search())
+
+        self.search_count_lbl = tk.Label(search, text="", font=self.fn_small,
+                                         bg=BG3, fg=TEXT_DIM, width=14)
+        self.search_count_lbl.pack(side="left", padx=(6, 2))
+        self._mkbtn(search, "Prev", lambda: self._goto_compare_match(-1), side="left", pad=(0, 2))
+        self._mkbtn(search, "Next", lambda: self._goto_compare_match(1), side="left", pad=(0, 2))
+        self._mkbtn(search, "Clear", self._clear_compare_search, side="left", pad=(0, 2))
+        tk.Checkbutton(
+            search, text="Aa", variable=self.search_case_var,
+            command=self._schedule_compare_search,
+            font=self.fn_small, bg=BG3, fg=TEXT_DIM,
+            activebackground=BG3, activeforeground=TEXT,
+            selectcolor=BG2, bd=0, padx=4,
+        ).pack(side="left", padx=(0, 4))
+        tk.Checkbutton(
+            search, text="Only results", variable=self.search_only_var,
+            command=self._schedule_compare_search,
+            font=self.fn_small, bg=BG3, fg=TEXT_DIM,
+            activebackground=BG3, activeforeground=TEXT,
+            selectcolor=BG2, bd=0, padx=4,
+        ).pack(side="left", padx=(0, 6))
+        self.bind("<Control-f>", self._focus_compare_search)
 
         tk.Label(tb, text="Double-click tên để đổi  ·  Kéo thanh phân cách để resize",
                  font=tkfont.Font(family=FONT_FAMILY, size=8),
@@ -192,7 +256,7 @@ class CurlCompareWindow(tk.Toplevel):
         diff_wrap.pack(fill="both", expand=True, padx=2, pady=2)
         diff_tw = tk.Text(diff_wrap, bg=BG2, fg=TEXT, font=self.fn_monos,
                           wrap="none", relief="flat", padx=8, pady=6,
-                          state="disabled", bd=0)
+                          cursor="xterm", bd=0)
         sb_dx = tk.Scrollbar(diff_wrap, orient="horizontal",
                               command=diff_tw.xview, bg=BG3, troughcolor=BG2, bd=0)
         sb_dy = tk.Scrollbar(diff_wrap, command=diff_tw.yview,
@@ -207,6 +271,10 @@ class CurlCompareWindow(tk.Toplevel):
         diff_tw.tag_configure("missing", background=self.HL_MISSING, foreground=self.FG_MISSING)
         diff_tw.tag_configure("same",    background=self.HL_SAME,    foreground=TEXT)
         diff_tw.tag_configure("linenum", foreground=TEXT_DIM)
+        diff_tw.tag_configure("search_match", background="#ffe4d6", foreground=TEXT)
+        diff_tw.tag_configure("search_current", background=ACCENT, foreground=ACTIVE_TEXT)
+        diff_tw.tag_raise("search_current")
+        self._make_diff_text_copyable(diff_tw)
 
         vpane.add(diff_frame, minsize=80)
         self.paned.add(outer, minsize=250)
@@ -220,6 +288,7 @@ class CurlCompareWindow(tk.Toplevel):
             "diff_badge": diff_badge,
         }
         self._panels.append(panel)
+        self._refresh_search_scope_options()
         return panel
 
     def _remove_panel(self, outer_frame: tk.Frame) -> None:
@@ -233,6 +302,8 @@ class CurlCompareWindow(tk.Toplevel):
         self.paned.remove(outer_frame)
         outer_frame.destroy()
         self._panels.pop(idx)
+        self._refresh_search_scope_options()
+        self._clear_compare_search_tags()
         self._run_compare()
 
     def _rename_panel(self, label_var: tk.StringVar) -> None:
@@ -240,6 +311,8 @@ class CurlCompareWindow(tk.Toplevel):
                                      initialvalue=label_var.get(), parent=self)
         if new and new.strip():
             label_var.set(new.strip())
+            self._refresh_search_scope_options()
+            self._schedule_compare_search()
 
     def _load_from_tabs(self) -> None:
         """Nạp curl từ các tab đang mở trong CurlRunnerApp."""
@@ -265,7 +338,289 @@ class CurlCompareWindow(tk.Toplevel):
 
         if len(self._panels) < 2:
             self._add_panel("")
+        self._refresh_search_scope_options()
         self._run_compare()
+
+    # ── Search ────────────────────────────────
+    def _panel_scope_label(self, idx: int, panel: dict) -> str:
+        return f"#{idx + 1} {panel['label_var'].get()}"
+
+    def _refresh_search_scope_options(self) -> None:
+        if not self.search_scope_cb:
+            return
+        current = self.search_scope_var.get()
+        values = ["All panels"] + [
+            self._panel_scope_label(idx, panel)
+            for idx, panel in enumerate(self._panels)
+        ]
+        self.search_scope_cb.configure(values=values)
+        if current not in values:
+            self.search_scope_var.set("All panels")
+
+    def _search_target_indices(self) -> list[int]:
+        scope = self.search_scope_var.get()
+        if scope == "All panels":
+            return list(range(len(self._panels)))
+        match = re.match(r"#(\d+)\s", scope)
+        if not match:
+            return list(range(len(self._panels)))
+        idx = int(match.group(1)) - 1
+        if 0 <= idx < len(self._panels):
+            return [idx]
+        return list(range(len(self._panels)))
+
+    def _search_terms(self) -> list[str]:
+        raw = self.search_var.get()
+        if "|" not in raw:
+            return [raw] if raw else []
+        return [part.strip() for part in raw.split("|") if part.strip()]
+
+    def _search_display_key(self, terms: list[str]) -> tuple | None:
+        if not self.search_only_var.get() or not terms:
+            return None
+        return (
+            tuple(term.lower() if not self.search_case_var.get() else term for term in terms),
+            tuple(self._search_target_indices()),
+            self.search_case_var.get(),
+        )
+
+    def _text_matches_terms(self, text: str, terms: list[str]) -> bool:
+        if self.search_case_var.get():
+            return any(term in text for term in terms)
+        lowered = text.lower()
+        return any(term.lower() in lowered for term in terms)
+
+    def _sync_search_only_view(self, terms: list[str]) -> None:
+        desired_key = self._search_display_key(terms)
+        if desired_key == self._display_filter_key:
+            return
+        if not self._last_diff_results:
+            self._display_filter_key = desired_key
+            return
+
+        if desired_key is None:
+            self._render_diff_results_now(self._last_diff_results, filtered=False)
+            self._display_filter_key = None
+            return
+
+        target_indices = set(self._search_target_indices())
+        filtered_results: list[list[tuple]] = []
+        for panel_idx, panel_diff in enumerate(self._last_diff_results):
+            if panel_idx not in target_indices:
+                filtered_results.append([])
+                continue
+            filtered_results.append([
+                (text, tag)
+                for text, tag in panel_diff
+                if self._text_matches_terms(text, terms)
+            ])
+        self._render_diff_results_now(filtered_results, filtered=True)
+        self._display_filter_key = desired_key
+
+    def _render_diff_results_now(self, diff_results: list[list[tuple]], filtered: bool) -> None:
+        total_visible = 0
+        for panel_idx, panel in enumerate(self._panels):
+            panel_diff = diff_results[panel_idx] if panel_idx < len(diff_results) else []
+            total_visible += len(panel_diff)
+            tw = panel["diff_tw"]
+            tw.config(state="normal")
+            tw.delete("1.0", "end")
+            for row_idx, (text, tag) in enumerate(panel_diff, 1):
+                tw.insert("end", f"{row_idx:>6}  ", "linenum")
+                tw.insert("end", (text or "·" * 30) + "\n", tag)
+            tw.config(state="normal")
+
+            if filtered:
+                panel["diff_badge"].config(
+                    text=f"  {len(panel_diff)} search results",
+                    fg=GREEN if panel_diff else TEXT_DIM,
+                )
+
+        if filtered:
+            scope = self.search_scope_var.get()
+            self.result_lbl.config(
+                text=f"  Search filter: {total_visible} dòng match  ·  Scope: {scope}",
+                fg=TEXT_DIM,
+            )
+        elif self._last_diff_results:
+            total = len(self._last_diff_results[0]) if self._last_diff_results else 0
+            same = sum(1 for _, tag in self._last_diff_results[0] if tag == "same")
+            self.result_lbl.config(
+                text=f"  Mode: {self._last_mode}  ·  {len(self._last_labels)} panels  ·  {total} dòng  ·  "
+                     f"{same} giống  ·  {total - same} khác  ·  full input, no character limit",
+                fg=TEXT_DIM,
+            )
+
+    def _focus_compare_search(self, _event=None):
+        if self.search_entry:
+            self.search_entry.focus_set()
+            self.search_entry.selection_range(0, "end")
+        return "break"
+
+    def _clear_compare_search(self):
+        self.search_var.set("")
+        self.search_matches = []
+        self.search_match_index = -1
+        self.search_match_overflow = False
+        self._clear_compare_search_tags()
+        self._update_compare_search_count()
+        return "break"
+
+    def _schedule_compare_search(self, *_):
+        if not self.search_count_lbl:
+            return
+        if self.search_after:
+            self.after_cancel(self.search_after)
+        self.search_after = self.after(120, self._run_compare_search)
+
+    def _clear_compare_search_tags(self, widget: tk.Text | None = None) -> None:
+        widgets = [widget] if widget else [
+            panel["diff_tw"] for panel in self._panels if panel.get("diff_tw")
+        ]
+        for tw in widgets:
+            old_state = str(tw.cget("state"))
+            if old_state == "disabled":
+                tw.config(state="normal")
+            tw.tag_remove("search_match", "1.0", "end")
+            tw.tag_remove("search_current", "1.0", "end")
+            if old_state == "disabled":
+                tw.config(state="disabled")
+
+    def _reset_compare_search_results(self, clear_tags: bool = True) -> None:
+        self.search_matches = []
+        self.search_match_index = -1
+        self.search_match_overflow = False
+        if clear_tags:
+            self._clear_compare_search_tags()
+        self._update_compare_search_count(rendering=self._rendering and bool(self._search_terms()))
+
+    def _run_compare_search(self) -> None:
+        self.search_after = None
+        terms = self._search_terms()
+        self.search_matches = []
+        self.search_match_index = -1
+        self.search_match_overflow = False
+        self._sync_search_only_view(terms)
+        self._clear_compare_search_tags()
+
+        if not terms:
+            self._update_compare_search_count()
+            return
+        if self._rendering:
+            self._update_compare_search_count(rendering=True)
+            return
+
+        target_indices = self._search_target_indices()
+        nocase = 0 if self.search_case_var.get() else 1
+        count_var = tk.IntVar(self)
+        matches: list[tuple[int, str, str]] = []
+        overflow = False
+
+        for panel_idx in target_indices:
+            if panel_idx >= len(self._panels):
+                continue
+            tw = self._panels[panel_idx]["diff_tw"]
+            old_state = str(tw.cget("state"))
+            if old_state == "disabled":
+                tw.config(state="normal")
+
+            panel_matches: list[tuple[int, str, str]] = []
+            seen: set[tuple[str, str]] = set()
+            for term in terms:
+                pos = "1.0"
+                while len(matches) + len(panel_matches) < self.SEARCH_HIGHLIGHT_LIMIT:
+                    hit = tw.search(term, pos, "end", nocase=nocase, count=count_var)
+                    if not hit:
+                        break
+                    chars = count_var.get() or len(term)
+                    end = f"{hit}+{chars}c"
+                    key = (hit, end)
+                    if key not in seen:
+                        seen.add(key)
+                        panel_matches.append((panel_idx, hit, end))
+                    pos = end if chars > 0 else f"{hit}+1c"
+                if len(matches) + len(panel_matches) >= self.SEARCH_HIGHLIGHT_LIMIT:
+                    break
+
+            panel_matches.sort(key=lambda item: (tw.count("1.0", item[1], "chars") or (0,))[0])
+            for _panel_idx, start, end in panel_matches:
+                tw.tag_add("search_match", start, end)
+            matches.extend(panel_matches)
+
+            tw.tag_raise("search_match")
+            tw.tag_raise("search_current")
+            if old_state == "disabled":
+                tw.config(state="disabled")
+            if len(matches) >= self.SEARCH_HIGHLIGHT_LIMIT:
+                overflow = True
+                break
+
+        self.search_matches = matches
+        self.search_match_overflow = overflow
+        if matches:
+            self.search_match_index = 0
+            self._mark_compare_current()
+        else:
+            self._update_compare_search_count()
+
+    def _goto_compare_match(self, step: int):
+        if not self._search_terms():
+            return self._focus_compare_search()
+        if self._rendering:
+            self._update_compare_search_count(rendering=True)
+            return "break"
+        if not self.search_matches:
+            self._run_compare_search()
+        if not self.search_matches:
+            return "break"
+        if self.search_match_index < 0:
+            self.search_match_index = 0
+        else:
+            self.search_match_index = (self.search_match_index + step) % len(self.search_matches)
+        self._mark_compare_current()
+        return "break"
+
+    def _mark_compare_current(self) -> None:
+        if not self.search_matches:
+            self._update_compare_search_count()
+            return
+        for panel in self._panels:
+            tw = panel["diff_tw"]
+            old_state = str(tw.cget("state"))
+            if old_state == "disabled":
+                tw.config(state="normal")
+            tw.tag_remove("search_current", "1.0", "end")
+            if old_state == "disabled":
+                tw.config(state="disabled")
+
+        panel_idx, start, end = self.search_matches[self.search_match_index]
+        if panel_idx >= len(self._panels):
+            self._run_compare_search()
+            return
+        tw = self._panels[panel_idx]["diff_tw"]
+        old_state = str(tw.cget("state"))
+        if old_state == "disabled":
+            tw.config(state="normal")
+        tw.tag_add("search_current", start, end)
+        tw.tag_raise("search_current")
+        if old_state == "disabled":
+            tw.config(state="disabled")
+        tw.see(start)
+        self._update_compare_search_count()
+
+    def _update_compare_search_count(self, rendering: bool = False) -> None:
+        if not self.search_count_lbl:
+            return
+        if not self._search_terms():
+            self.search_count_lbl.config(text="")
+        elif rendering:
+            self.search_count_lbl.config(text="rendering...")
+        elif not self.search_matches:
+            self.search_count_lbl.config(text="0/0")
+        else:
+            panel_idx = self.search_matches[self.search_match_index][0]
+            total = f"{len(self.search_matches)}+" if self.search_match_overflow else str(len(self.search_matches))
+            self.search_count_lbl.config(text=f"{self.search_match_index + 1}/{total}  P{panel_idx + 1}")
 
     # ── Diff engine ───────────────────────────
     def _detect_mode(self, raws: list[str], explicit: str = "auto") -> str:
@@ -486,6 +841,11 @@ class CurlCompareWindow(tk.Toplevel):
         requested_mode = self.mode_var.get().strip().lower()
         labels = [p["label_var"].get() for p in self._panels]
         self._rendering = True
+        self._last_mode = ""
+        self._last_labels = []
+        self._last_diff_results = []
+        self._display_filter_key = None
+        self._reset_compare_search_results()
         if self.compare_btn:
             self.compare_btn.config(state="disabled", text="Đang so sánh...")
         self.result_lbl.config(
@@ -497,7 +857,7 @@ class CurlCompareWindow(tk.Toplevel):
             dw.config(state="normal")
             dw.delete("1.0", "end")
             dw.insert("end", "  Đang xử lý...\n", "linenum")
-            dw.config(state="disabled")
+            dw.config(state="normal")
             panel["diff_badge"].config(text="  working...", fg=TEXT_DIM)
 
         def worker() -> None:
@@ -549,15 +909,19 @@ class CurlCompareWindow(tk.Toplevel):
                 dw.config(state="normal")
                 dw.delete("1.0", "end")
                 dw.insert("end", error, "changed")
-                dw.config(state="disabled")
+                dw.config(state="normal")
                 panel["diff_badge"].config(text="  lỗi", fg=RED_C)
             return
 
+        self._last_mode = mode
+        self._last_labels = labels[:]
+        self._last_diff_results = diff_results
+        self._display_filter_key = None
         for pi, panel in enumerate(self._panels):
             dw = panel["diff_tw"]
             dw.config(state="normal")
             dw.delete("1.0", "end")
-            dw.config(state="disabled")
+            dw.config(state="normal")
             panel["diff_badge"].config(text="  rendering...", fg=TEXT_DIM)
 
         same = sum(1 for _, tag in (diff_results[0] if diff_results else []) if tag == "same")
@@ -593,7 +957,7 @@ class CurlCompareWindow(tk.Toplevel):
             text, tag = panel_diff[ln]
             dw.insert("end", f"{ln + 1:>6}  ", "linenum")
             dw.insert("end", (text or "·" * 30) + "\n", tag)
-        dw.config(state="disabled")
+        dw.config(state="normal")
 
         rendered = end
         total = len(panel_diff)
@@ -637,8 +1001,69 @@ class CurlCompareWindow(tk.Toplevel):
                  f"{same} giống  ·  {total - same} khác  ·  full input, no character limit",
             fg=TEXT_DIM,
         )
+        if self.search_var.get():
+            self._schedule_compare_search()
 
     # ── Helpers ───────────────────────────────
+    def _make_diff_text_copyable(self, tw: tk.Text) -> None:
+        tw.bind("<KeyPress>", self._block_diff_text_edit, add="+")
+        tw.bind("<Control-a>", lambda _e, w=tw: self._select_all_diff_text(w))
+        tw.bind("<Control-A>", lambda _e, w=tw: self._select_all_diff_text(w))
+        tw.bind("<Control-c>", lambda _e, w=tw: self._copy_diff_selection(w))
+        tw.bind("<Control-C>", lambda _e, w=tw: self._copy_diff_selection(w))
+        tw.bind("<Control-v>", lambda _e: "break")
+        tw.bind("<Control-V>", lambda _e: "break")
+        tw.bind("<Control-x>", lambda _e: "break")
+        tw.bind("<Control-X>", lambda _e: "break")
+        tw.bind("<<Paste>>", lambda _e: "break")
+        tw.bind("<<Cut>>", lambda _e: "break")
+        tw.bind("<Button-2>", lambda _e: "break")
+        tw.bind("<Button-3>", lambda e, w=tw: self._show_diff_context_menu(w, e))
+
+    def _block_diff_text_edit(self, event) -> str | None:
+        ctrl_pressed = bool(event.state & 0x4)
+        nav_keys = {
+            "Left", "Right", "Up", "Down", "Prior", "Next", "Home", "End",
+            "Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R",
+            "Escape",
+        }
+        if ctrl_pressed or event.keysym in nav_keys:
+            return None
+        return "break"
+
+    def _select_all_diff_text(self, tw: tk.Text):
+        tw.focus_set()
+        tw.tag_add("sel", "1.0", "end-1c")
+        tw.mark_set("insert", "1.0")
+        tw.see("insert")
+        return "break"
+
+    def _copy_diff_selection(self, tw: tk.Text):
+        try:
+            selected = tw.get("sel.first", "sel.last")
+        except tk.TclError:
+            return "break"
+        if selected:
+            self.clipboard_clear()
+            self.clipboard_append(selected)
+        return "break"
+
+    def _copy_all_diff_text(self, tw: tk.Text):
+        content = tw.get("1.0", "end-1c")
+        if content:
+            self.clipboard_clear()
+            self.clipboard_append(content)
+        return "break"
+
+    def _show_diff_context_menu(self, tw: tk.Text, event):
+        tw.focus_set()
+        menu = tk.Menu(self, tearoff=0, bg=BG3, fg=TEXT, activebackground=ACCENT)
+        menu.add_command(label="Copy", command=lambda: self._copy_diff_selection(tw))
+        menu.add_command(label="Select all", command=lambda: self._select_all_diff_text(tw))
+        menu.add_command(label="Copy all", command=lambda: self._copy_all_diff_text(tw))
+        menu.tk_popup(event.x_root, event.y_root)
+        return "break"
+
     def _mkbtn(self, parent: tk.Widget, text: str, cmd,
                side: str = "left", pad: tuple = (0, 0)) -> tk.Button:
         b = tk.Button(parent, text=text, font=self.fn_label,

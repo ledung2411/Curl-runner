@@ -379,6 +379,18 @@ Compare giúp thấy khác biệt giữa nhiều nội dung:
 - Có thể thêm/xoá panel
 - Có thể load curl từ các tab đang mở
 
+Thanh **Search** trong Compare tìm trên phần **DIFF VIEW**:
+
+- Nhập nhiều giá trị bằng dấu `|`, ví dụ `error|timeout|token`
+- Scope `All panels`: tìm trong toàn bộ panel
+- Scope `#1`, `#2`...: chỉ tìm trong panel được chọn
+- **Prev / Next**: nhảy giữa các kết quả
+- **Aa**: bật/tắt phân biệt hoa thường
+- **Only results**: chỉ hiển thị các dòng match trong DIFF VIEW
+- **Clear**: xoá từ khóa và highlight
+
+Phần **DIFF VIEW** là read-only nhưng vẫn cho bôi đen copy text. Có thể dùng `Ctrl+C`, `Ctrl+A`, hoặc chuột phải để chọn **Copy**, **Select all**, **Copy all**.
+
 Mode `auto` tự nhận dạng nội dung. Với `curl` và `json`, Compare align theo key/path nên khi một bên có thêm field mới, các field còn lại vẫn dễ đọc và không bị lệch dòng.
 
 Với nội dung rất dài, Compare không giới hạn ký tự. App xử lý trong background và render kết quả theo từng batch để UI không bị đơ.

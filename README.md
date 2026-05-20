@@ -147,6 +147,15 @@ Nhấn **⇄ Compare** trên topbar để mở popup so sánh. Mode mặc địn
 | `text` | So sánh từng dòng raw text |
 | `string` | So sánh chuỗi ngắn theo token hoặc từng ký tự |
 
+**Search trong Compare:**
+- Nhập từ khóa vào thanh **Search** để tìm trong phần **DIFF VIEW**
+- Tìm nhiều giá trị bằng dấu `|`, ví dụ `error|timeout|token`
+- **Scope** chọn `All panels` để tìm toàn bộ, hoặc chọn `#1`, `#2`... để chỉ tìm trong một panel
+- **Prev / Next** nhảy giữa các kết quả; **Aa** bật/tắt phân biệt hoa thường
+- **Only results** lọc DIFF VIEW để chỉ hiển thị các dòng match với search
+- Search highlight theo batch giới hạn vùng tô màu để vẫn mượt với nội dung dài
+- **DIFF VIEW** cho phép bôi đen copy text; chuột phải có **Copy / Select all / Copy all**
+
 **Cấu trúc popup:**
 - Các panel nằm ngang, **kéo thanh phân cách để resize**
 - Mỗi panel gồm 2 vùng kéo thả: **INPUT** và **DIFF VIEW** (highlight)
